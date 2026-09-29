@@ -95,6 +95,7 @@ class ConanRename(_PluginBase):
     _cache_hours: int = 12
     # 识别词同步
     _sync_enabled: bool = False
+    _sync_onlyonce: bool = False
     _sync_cron: Optional[str] = None
     _sync_sub_ids: List[int] = []
     _sync_mode: str = "range"
@@ -128,6 +129,7 @@ class ConanRename(_PluginBase):
                 self._cache_hours = 12
             # 识别词同步
             self._sync_enabled = bool(config.get("sync_enabled"))
+            self._sync_onlyonce = bool(config.get("sync_onlyonce"))
             self._sync_cron = config.get("sync_cron")
             self._sync_sub_ids = self._normalize_sub_ids(config.get("sync_sub_ids"))
             self._sync_mode = config.get("sync_mode") or "range"
@@ -135,15 +137,19 @@ class ConanRename(_PluginBase):
             self._sync_back = str(config.get("sync_back") or "").strip() or r"\.1996"
             self._sync_keep_others = bool(config.get("sync_keep_others", True))
 
+        pending_jobs: List[Dict[str, Any]] = []
         if self._enabled and self._onlyonce:
+            pending_jobs.append({"func": self.run_once, "name": "柯南映射重命名"})
+        if self._enabled and self._sync_enabled and self._sync_onlyonce:
+            pending_jobs.append({"func": self.sync_words, "name": "柯南识别词同步"})
+        if pending_jobs:
             self._scheduler = BackgroundScheduler(timezone="Asia/Shanghai")
-            self._scheduler.add_job(func=self.run_once, trigger="date",
-                                    kwargs={"manual": False}, name="柯南映射重命名")
-            if self._sync_enabled:
-                self._scheduler.add_job(func=self.sync_words, trigger="date",
-                                        kwargs={"manual": False}, name="柯南识别词同步")
+            for job in pending_jobs:
+                self._scheduler.add_job(func=job["func"], trigger="date",
+                                        kwargs={"manual": False}, name=job["name"])
             self._scheduler.start()
             self._onlyonce = False
+            self._sync_onlyonce = False
             self.__update_config()
 
     def get_state(self) -> bool:
@@ -193,6 +199,7 @@ class ConanRename(_PluginBase):
             "extra_map": self._extra_map, "dry_run": self._dry_run,
             "cache_hours": self._cache_hours,
             "sync_enabled": self._sync_enabled, "sync_cron": self._sync_cron,
+            "sync_onlyonce": self._sync_onlyonce,
             "sync_sub_ids": self._sync_sub_ids, "sync_mode": self._sync_mode,
             "sync_front": self._sync_front, "sync_back": self._sync_back,
             "sync_keep_others": self._sync_keep_others,
@@ -239,8 +246,10 @@ class ConanRename(_PluginBase):
                         {"component": "VSwitch", "props": {"model": "enabled", "label": "启用插件"}}]},
                     {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
                         {"component": "VSwitch", "props": {"model": "notify", "label": "发送通知"}}]},
-                    {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
+                    {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [
                         {"component": "VSwitch", "props": {"model": "dry_run", "label": "仅预演（不改名、不写识别词）"}}]},
+                    {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [
+                        {"component": "VSwitch", "props": {"model": "onlyonce", "label": "保存后立即改名一次"}}]},
                 ]},
                 {"component": "VRow", "content": [
                     {"component": "VCol", "props": {"cols": 12}, "content": [
@@ -294,6 +303,8 @@ class ConanRename(_PluginBase):
                     {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
                         {"component": "VSwitch", "props": {"model": "sync_keep_others", "label": "保留订阅里其它识别词"}}]},
                     {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
+                        {"component": "VSwitch", "props": {"model": "sync_onlyonce", "label": "保存后立即同步一次识别词"}}]},
+                    {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
                         {"component": "VTextField", "props": {
                             "model": "sync_cron", "label": "同步定时（cron，留空=只手动）",
                             "placeholder": "0 8 * * *"}}]},
@@ -325,10 +336,12 @@ class ConanRename(_PluginBase):
             ]}
         ], {
             "enabled": self._enabled, "notify": self._notify, "dry_run": self._dry_run,
+            "onlyonce": self._onlyonce, "sync_onlyonce": self._sync_onlyonce,
             "src_dir": self._src_dir, "dst_dir": self._dst_dir, "mode": self._mode,
             "cron": self._cron, "mapping_url": self._mapping_url,
             "cache_hours": self._cache_hours, "extra_map": self._extra_map,
             "sync_enabled": self._sync_enabled, "sync_cron": self._sync_cron,
+            "sync_onlyonce": self._sync_onlyonce,
             "sync_sub_ids": self._sync_sub_ids, "sync_mode": self._sync_mode,
             "sync_front": self._sync_front, "sync_back": self._sync_back,
             "sync_keep_others": self._sync_keep_others,

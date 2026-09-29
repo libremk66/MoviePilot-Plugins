@@ -13,5 +13,20 @@
     "history": {
       "v1.7.2": "基于内置插件 LinkMonitor 1.7.1 修改：① 新增已处理文件记录（源文件路径 + 大小/修改时间/inode + 目标目录），硬链被移动/入库后不再重复生成；② 目标文件已存在时自动补登记；③ 记录持久化在插件数据目录；④ 新增清空记录命令与接口；⑤ 跳过时不再发送通知"
     }
+  },
+  "ConanRename": {
+    "name": "柯南集数映射重命名",
+    "description": "按银色子弹数据站(sbsub)的权威映射，把拆分版集号改名为 TMDB 集号（自动处理 -partN 多段与特辑），解决固定偏移会漂移的问题。",
+    "labels": "文件管理",
+    "version": "1.0.0",
+    "icon": "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/Linkace_C.png",
+    "author": "libremk66",
+    "level": 1,
+    "system_version": ">=3.0.0",
+    "release": false,
+    "history": {
+      "v1.0.0": "首版：sbsub 映射 + 递归扫描 + 多段/特辑处理 + 预演模式 + 不覆盖保护"
+    },
+    "v3": false
   }
 }

@@ -15,15 +15,16 @@
   },
   "ConanRename": {
     "name": "柯南集数映射重命名",
-    "description": "按银色子弹数据站(sbsub)的权威映射，把拆分版集号改名为 TMDB 集号（自动处理 -partN 多段与特辑），解决固定偏移会漂移的问题。",
+    "description": "按银色子弹数据站(sbsub)的权威映射，把拆分版集号改名为 TMDB 集号（自动处理 -partN 多段与特辑）；可按当前映射同步订阅识别词、页面查看映射表。",
     "labels": "文件管理",
-    "version": "1.0.0",
+    "version": "1.1.0",
     "icon": "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/Linkace_C.png",
     "author": "libremk66",
     "level": 1,
     "system_version": ">=3.0.0",
     "release": false,
     "history": {
+      "v1.1.0": "新增「识别词同步」：按当前映射的每个偏移区间生成区间限定识别词，写回所选订阅的自定义识别词（只动插件维护的注释区块，其它识别词保留；可选只写最新偏移一条）；支持独立同步 cron、手动执行与规则预览；插件页面新增当前映射表（区间/偏移/集数/规则）。修复：改名流程不变。",
       "v1.0.0": "首版：sbsub 映射 + 递归扫描 + 多段/特辑处理 + 预演模式 + 不覆盖保护"
     }
   },

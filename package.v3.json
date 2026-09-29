@@ -8,7 +8,6 @@
     "author": "jxxghp, libremk66",
     "level": 1,
     "system_version": ">=3.0.0",
-    "v3": false,
     "release": false,
     "history": {
       "v1.7.2": "基于内置插件 LinkMonitor 1.7.1 修改：① 新增已处理文件记录（源文件路径 + 大小/修改时间/inode + 目标目录），硬链被移动/入库后不再重复生成；② 目标文件已存在时自动补登记；③ 记录持久化在插件数据目录；④ 新增清空记录命令与接口；⑤ 跳过时不再发送通知"

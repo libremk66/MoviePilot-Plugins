@@ -127,7 +127,7 @@ class YahahaCoverStudio(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/justzerock/MoviePilot-Plugins/main/icons/yahaha-cover-studio.png"
     # 插件版本
-    plugin_version = "2.2.10.2"
+    plugin_version = "2.2.10.3"
     # 插件作者
     plugin_author = "呀哈哈"
     # 作者主页
@@ -774,7 +774,7 @@ class YahahaCoverStudio(_PluginBase):
             else "auto",
             "custom_bg_color": str(raw.get("custom_bg_color", base.get("custom_bg_color", "")) or "").strip(),
             "bg_style": str(raw.get("bg_style", base.get("bg_style", "blur")) or "blur").strip().lower()
-            if str(raw.get("bg_style", base.get("bg_style", "blur")) or "blur").strip().lower() in ["blur", "solid"]
+            if str(raw.get("bg_style", base.get("bg_style", "blur")) or "blur").strip().lower() in ["blur", "solid", "gradient"]
             else "blur",
         }
 

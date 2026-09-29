@@ -19,6 +19,18 @@ from app.plugins.yahahacoverstudio.style.style_static_2 import (
 from app.plugins.yahahacoverstudio.utils.color_helper import ColorHelper
 
 
+def _gradient_bg(width, height, color):
+    """用单个颜色做左深右浅的横向渐变背景（与插件原生「纯色渐变」同款：左 = 色×0.65，右 = 提亮到 ≤230）"""
+    base = _safe_rgb(color)
+    left = tuple(int(c * 0.65) for c in base)
+    right = tuple(int(min(230, max(c * 1.9, c + 80))) for c in base)
+    left_img = Image.new("RGB", (width, height), left)
+    right_img = Image.new("RGB", (width, height), right)
+    mask = Image.new("L", (width, height), 0)
+    mask.putdata([int(255.0 * ((x / float(width)) ** 0.7)) for _y in range(height) for x in range(width)])
+    return Image.composite(right_img, left_img, mask)
+
+
 def _safe_rgb(color):
     """把颜色统一成 (r, g, b) 整数三元组（纯色背景用，不压暗）"""
     try:
@@ -283,9 +295,13 @@ def create_style_animated_2(
             else:
                 colors = find_dominant_vibrant_colors(src, num_colors=5)
                 bg_color = colors[0] if colors else (120, 120, 120)
-            if str(bg_style or "blur").strip().lower() == "solid":
+            bg_mode = str(bg_style or "blur").strip().lower()
+            if bg_mode == "solid":
                 # 纯色背景：所选颜色原样铺满（不压暗、不加噪点）
                 bg_mix = Image.new("RGB", (target_w, target_h), _safe_rgb(bg_color))
+            elif bg_mode == "gradient":
+                # 纯色渐变：用所选颜色做左深右浅的横向渐变
+                bg_mix = _gradient_bg(target_w, target_h, bg_color)
             else:
                 bg_img = ImageOps.fit(src, (target_w, target_h), method=Image.Resampling.BICUBIC)
                 bg_img = bg_img.filter(ImageFilter.GaussianBlur(radius=max(1, int(blur_size * target_h / 1080.0))))

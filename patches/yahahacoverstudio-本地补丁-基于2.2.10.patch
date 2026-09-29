@@ -1,5 +1,5 @@
 diff --git a/mcg_frontend/src/components/Page.vue b/mcg_frontend/src/components/Page.vue
-index 40ce64d..3544550 100644
+index 40ce64d..469209d 100644
 --- a/mcg_frontend/src/components/Page.vue
 +++ b/mcg_frontend/src/components/Page.vue
 @@ -430,7 +430,13 @@
@@ -12,7 +12,7 @@ index 40ce64d..3544550 100644
 +                            :items="animatedBackgroundStyleItems"
 +                          />
                            <BlueprintRange
-+                            v-if="animatedSettings.bgStyle !== 'solid'"
++                            v-if="animatedSettings.bgStyle === 'blur'"
                              v-model="animatedSettings.blurSize"
                              label="背景模糊"
                              :min="0"
@@ -20,7 +20,7 @@ index 40ce64d..3544550 100644
                              :step="1"
                            />
                            <BlueprintRange
-+                            v-if="animatedSettings.bgStyle !== 'solid'"
++                            v-if="animatedSettings.bgStyle === 'blur'"
                              v-model="animatedSettings.colorRatio"
                              label="背景混色"
                              :min="0"
@@ -48,7 +48,7 @@ index 40ce64d..3544550 100644
    titleScale: 1,
 +  bgColorMode: 'auto' as 'auto' | 'custom' | 'config',
 +  customBgColor: '',
-+  bgStyle: 'blur' as 'blur' | 'solid',
++  bgStyle: 'blur' as 'blur' | 'solid' | 'gradient',
  })
 +const defaultAnimatedBgColor = getThemeColor('--mcr-cover-auto-blend')
  
@@ -79,8 +79,8 @@ index 40ce64d..3544550 100644
 +    ? source.bg_color_mode as 'auto' | 'custom' | 'config'
 +    : 'auto'
 +  animatedSettings.customBgColor = String(source.custom_bg_color || animatedSettings.customBgColor || '')
-+  animatedSettings.bgStyle = ['blur', 'solid'].includes(String(source.bg_style))
-+    ? source.bg_style as 'blur' | 'solid'
++  animatedSettings.bgStyle = ['blur', 'solid', 'gradient'].includes(String(source.bg_style))
++    ? source.bg_style as 'blur' | 'solid' | 'gradient'
 +    : 'blur'
  }
  
@@ -106,13 +106,14 @@ index 40ce64d..3544550 100644
      }
      const resp = await props.api.post<{
        code: number
-@@ -2577,6 +2624,17 @@ const animatedDepartureItems = [
+@@ -2577,6 +2624,18 @@ const animatedDepartureItems = [
    { title: '渐变', value: 'crossfade' },
  ]
  
 +const animatedBackgroundStyleItems = [
 +  { title: '模糊主图（混所选颜色）', value: 'blur' },
 +  { title: '纯色', value: 'solid' },
++  { title: '纯色渐变（左深右浅）', value: 'gradient' },
 +]
 +
 +const animatedBackgroundColorSourceItems = [
@@ -125,7 +126,7 @@ index 40ce64d..3544550 100644
    const index = animatedSettingsBaseStyle.value.split('_')[1] || '1'
    return `动态方案 ${index} 配置`
 diff --git a/mcg_frontend/src/types/plugin.ts b/mcg_frontend/src/types/plugin.ts
-index 4f0d424..cf9924b 100644
+index 4f0d424..c1c7d73 100644
 --- a/mcg_frontend/src/types/plugin.ts
 +++ b/mcg_frontend/src/types/plugin.ts
 @@ -114,6 +114,9 @@ export interface AnimatedStyleSettings {
@@ -134,12 +135,12 @@ index 4f0d424..cf9924b 100644
    title_scale?: number
 +  bg_color_mode?: 'auto' | 'custom' | 'config'
 +  custom_bg_color?: string
-+  bg_style?: 'blur' | 'solid'
++  bg_style?: 'blur' | 'solid' | 'gradient'
  }
  
  export interface TemplateTransform {
 diff --git a/plugins.v2/yahahacoverstudio/__init__.py b/plugins.v2/yahahacoverstudio/__init__.py
-index 6990688..154dcc8 100644
+index 6990688..0ac1ef5 100644
 --- a/plugins.v2/yahahacoverstudio/__init__.py
 +++ b/plugins.v2/yahahacoverstudio/__init__.py
 @@ -221,6 +221,8 @@ class YahahaCoverStudio(_PluginBase):
@@ -184,7 +185,7 @@ index 6990688..154dcc8 100644
 +            else "auto",
 +            "custom_bg_color": str(raw.get("custom_bg_color", base.get("custom_bg_color", "")) or "").strip(),
 +            "bg_style": str(raw.get("bg_style", base.get("bg_style", "blur")) or "blur").strip().lower()
-+            if str(raw.get("bg_style", base.get("bg_style", "blur")) or "blur").strip().lower() in ["blur", "solid"]
++            if str(raw.get("bg_style", base.get("bg_style", "blur")) or "blur").strip().lower() in ["blur", "solid", "gradient"]
 +            else "blur",
          }
  
@@ -278,13 +279,25 @@ index 6990688..154dcc8 100644
          return image_data
      
 diff --git a/plugins.v2/yahahacoverstudio/style/style_animated_1.py b/plugins.v2/yahahacoverstudio/style/style_animated_1.py
-index 3f60868..f866dc8 100644
+index 3f60868..ffed0d5 100644
 --- a/plugins.v2/yahahacoverstudio/style/style_animated_1.py
 +++ b/plugins.v2/yahahacoverstudio/style/style_animated_1.py
-@@ -19,6 +19,15 @@ def darken_color(color, factor=0.7):
+@@ -19,6 +19,27 @@ def darken_color(color, factor=0.7):
      return (int(color[0] * factor), int(color[1] * factor), int(color[2] * factor))
  
  
++def _gradient_bg(width, height, color):
++    """用单个颜色做左深右浅的横向渐变背景（与插件原生「纯色渐变」同款：左 = 色×0.65，右 = 提亮到 ≤230）"""
++    base = _safe_rgb(color)
++    left = tuple(int(c * 0.65) for c in base)
++    right = tuple(int(min(230, max(c * 1.9, c + 80))) for c in base)
++    left_img = Image.new("RGB", (width, height), left)
++    right_img = Image.new("RGB", (width, height), right)
++    mask = Image.new("L", (width, height), 0)
++    mask.putdata([int(255.0 * ((x / float(width)) ** 0.7)) for _y in range(height) for x in range(width)])
++    return Image.composite(right_img, left_img, mask)
++
++
 +def _safe_rgb(color):
 +    """把颜色统一成 (r, g, b) 整数三元组（纯色背景用，不压暗）"""
 +    try:
@@ -297,7 +310,7 @@ index 3f60868..f866dc8 100644
  def add_film_grain(image, intensity=0.03):
      img_array = np.array(image, dtype=np.float32)
      noise = np.random.normal(0, intensity * 255, img_array.shape)
-@@ -312,6 +321,7 @@ def create_style_animated_1(
+@@ -312,6 +333,7 @@ def create_style_animated_1(
      image_count=5,
      departure_type="fly",
      stop_event=None,
@@ -305,15 +318,15 @@ index 3f60868..f866dc8 100644
  ):
      def _animate_background(bg_base_rgba, phase, duration_seconds):
          phase = _clamp(phase, 0.0, 1.0)
-@@ -445,6 +455,7 @@ def create_style_animated_1(
+@@ -445,6 +467,7 @@ def create_style_animated_1(
              return False
  
          logger.info("正在提取色彩与合成背景...")
-+        solid_bg = str(bg_style or "blur").strip().lower() == "solid"
++        bg_mode = str(bg_style or "blur").strip().lower()
          # 为每张卡片预生成背景，确保顶层切换时背景同步变化
          bg_bases_rgba = []
          for img in images:
-@@ -462,14 +473,18 @@ def create_style_animated_1(
+@@ -462,14 +485,21 @@ def create_style_animated_1(
                  base_color = vibrant_colors[0] if vibrant_colors else (100, 100, 100)
              bg_color = darken_color(base_color, 0.85)
  
@@ -325,9 +338,12 @@ index 3f60868..f866dc8 100644
 -                color_ratio,
 -            )
 -            bg_img = add_film_grain(bg_img, 0.03)
-+            if solid_bg:
++            if bg_mode == "solid":
 +                # 纯色背景：所选颜色原样铺满（不压暗、不加噪点）
 +                bg_img = Image.new("RGB", (target_w, target_h), _safe_rgb(base_color))
++            elif bg_mode == "gradient":
++                # 纯色渐变：用所选颜色做左深右浅的横向渐变
++                bg_img = _gradient_bg(target_w, target_h, base_color)
 +            else:
 +                bg_img = ImageOps.fit(img, (target_w, target_h), method=Image.Resampling.BICUBIC)
 +                bg_img = bg_img.filter(ImageFilter.GaussianBlur(radius=int(blur_size * scale)))
@@ -341,13 +357,25 @@ index 3f60868..f866dc8 100644
  
          # 文本阴影主色使用第一张图的背景色系
 diff --git a/plugins.v2/yahahacoverstudio/style/style_animated_2.py b/plugins.v2/yahahacoverstudio/style/style_animated_2.py
-index 8b020b3..2ce2d08 100644
+index 8b020b3..fb88839 100644
 --- a/plugins.v2/yahahacoverstudio/style/style_animated_2.py
 +++ b/plugins.v2/yahahacoverstudio/style/style_animated_2.py
-@@ -19,6 +19,15 @@ from app.plugins.yahahacoverstudio.style.style_static_2 import (
+@@ -19,6 +19,27 @@ from app.plugins.yahahacoverstudio.style.style_static_2 import (
  from app.plugins.yahahacoverstudio.utils.color_helper import ColorHelper
  
  
++def _gradient_bg(width, height, color):
++    """用单个颜色做左深右浅的横向渐变背景（与插件原生「纯色渐变」同款：左 = 色×0.65，右 = 提亮到 ≤230）"""
++    base = _safe_rgb(color)
++    left = tuple(int(c * 0.65) for c in base)
++    right = tuple(int(min(230, max(c * 1.9, c + 80))) for c in base)
++    left_img = Image.new("RGB", (width, height), left)
++    right_img = Image.new("RGB", (width, height), right)
++    mask = Image.new("L", (width, height), 0)
++    mask.putdata([int(255.0 * ((x / float(width)) ** 0.7)) for _y in range(height) for x in range(width)])
++    return Image.composite(right_img, left_img, mask)
++
++
 +def _safe_rgb(color):
 +    """把颜色统一成 (r, g, b) 整数三元组（纯色背景用，不压暗）"""
 +    try:
@@ -360,7 +388,7 @@ index 8b020b3..2ce2d08 100644
  def _clamp(v, lo, hi):
      return max(lo, min(hi, v))
  
-@@ -207,6 +216,7 @@ def create_style_animated_2(
+@@ -207,6 +228,7 @@ def create_style_animated_2(
      animation_reduce_colors="strong",
      image_count=9,
      stop_event=None,
@@ -368,7 +396,7 @@ index 8b020b3..2ce2d08 100644
  ):
      try:
          try:
-@@ -273,10 +283,14 @@ def create_style_animated_2(
+@@ -273,10 +295,18 @@ def create_style_animated_2(
              else:
                  colors = find_dominant_vibrant_colors(src, num_colors=5)
                  bg_color = colors[0] if colors else (120, 120, 120)
@@ -376,9 +404,13 @@ index 8b020b3..2ce2d08 100644
 -            bg_img = bg_img.filter(ImageFilter.GaussianBlur(radius=max(1, int(blur_size * target_h / 1080.0))))
 -            bg_mix = Image.blend(bg_img, Image.new("RGB", (target_w, target_h), darken_color(bg_color, 0.85)), float(_clamp(float(color_ratio), 0.0, 1.0)))
 -            bg_mix = add_film_grain(bg_mix, intensity=0.03)
-+            if str(bg_style or "blur").strip().lower() == "solid":
++            bg_mode = str(bg_style or "blur").strip().lower()
++            if bg_mode == "solid":
 +                # 纯色背景：所选颜色原样铺满（不压暗、不加噪点）
 +                bg_mix = Image.new("RGB", (target_w, target_h), _safe_rgb(bg_color))
++            elif bg_mode == "gradient":
++                # 纯色渐变：用所选颜色做左深右浅的横向渐变
++                bg_mix = _gradient_bg(target_w, target_h, bg_color)
 +            else:
 +                bg_img = ImageOps.fit(src, (target_w, target_h), method=Image.Resampling.BICUBIC)
 +                bg_img = bg_img.filter(ImageFilter.GaussianBlur(radius=max(1, int(blur_size * target_h / 1080.0))))
@@ -388,7 +420,7 @@ index 8b020b3..2ce2d08 100644
  
              prepared_text.append(_build_text_layer((target_w, target_h), title, font_path, font_size, font_offset, bg_color))
 diff --git a/plugins.v2/yahahacoverstudio/style/style_animated_3.py b/plugins.v2/yahahacoverstudio/style/style_animated_3.py
-index 9f920ec..fd5664e 100644
+index 9f920ec..2ecfda2 100644
 --- a/plugins.v2/yahahacoverstudio/style/style_animated_3.py
 +++ b/plugins.v2/yahahacoverstudio/style/style_animated_3.py
 @@ -759,11 +759,11 @@ def add_film_grain(image, intensity=0.05):
@@ -408,30 +440,47 @@ index 9f920ec..fd5664e 100644
      """
      生成多图滚动的动图 (GIF/WebP)，通过 ffmpeg 合成
      已优化版：在目标分辨率下直接合成，预处理旋转和文字，效率提升约 5-8 倍。
-@@ -833,7 +833,14 @@ def create_style_animated_3(library_dir, title, font_path, font_size=(170,75), f
+@@ -833,7 +833,19 @@ def create_style_animated_3(library_dir, title, font_path, font_size=(170,75), f
              gradient_color = get_poster_primary_color(first_image_path)
  
          # 直接在目标分辨率生成背景
 -        if is_blur:
-+        if str(bg_style or "blur").strip().lower() == "solid":
++        bg_mode = str(bg_style or "blur").strip().lower()
++        if bg_mode == "solid":
 +            # 纯色背景：直接用所选颜色铺满，不压暗、不加噪点、不做左→右变白渐变
 +            solid_rgb = tuple(min(255, max(0, int(c))) for c in tuple(blur_color)[:3])
 +            if len(solid_rgb) < 3:
 +                solid_rgb = (100, 100, 100)
 +            bg_img = Image.new("RGBA", (target_w, target_h), solid_rgb + (255,))
 +            logger.info(f"背景类型=纯色，使用颜色 {solid_rgb}")
++        elif bg_mode == "gradient":
++            # 纯色渐变：用所选颜色做左深右浅的横向渐变（插件原生「纯色渐变」同款）
++            bg_img = create_gradient_background(target_w, target_h, tuple(blur_color)[:3])
++            logger.info(f"背景类型=纯色渐变，基准颜色 {tuple(blur_color)[:3]}")
 +        elif is_blur:
              bg_img = create_blur_background(first_image_path, target_w, target_h, blur_color, blur_size * scale, color_ratio)
          else:
              bg_img = create_gradient_background(target_w, target_h, gradient_color)
 diff --git a/plugins.v2/yahahacoverstudio/style/style_animated_4.py b/plugins.v2/yahahacoverstudio/style/style_animated_4.py
-index 16ec1b7..c58618a 100644
+index 16ec1b7..05f6669 100644
 --- a/plugins.v2/yahahacoverstudio/style/style_animated_4.py
 +++ b/plugins.v2/yahahacoverstudio/style/style_animated_4.py
-@@ -18,6 +18,15 @@ from app.plugins.yahahacoverstudio.style.style_static_2 import (
+@@ -18,6 +18,27 @@ from app.plugins.yahahacoverstudio.style.style_static_2 import (
  from app.plugins.yahahacoverstudio.utils.color_helper import ColorHelper
  
  
++def _gradient_bg(width, height, color):
++    """用单个颜色做左深右浅的横向渐变背景（与插件原生「纯色渐变」同款：左 = 色×0.65，右 = 提亮到 ≤230）"""
++    base = _safe_rgb(color)
++    left = tuple(int(c * 0.65) for c in base)
++    right = tuple(int(min(230, max(c * 1.9, c + 80))) for c in base)
++    left_img = Image.new("RGB", (width, height), left)
++    right_img = Image.new("RGB", (width, height), right)
++    mask = Image.new("L", (width, height), 0)
++    mask.putdata([int(255.0 * ((x / float(width)) ** 0.7)) for _y in range(height) for x in range(width)])
++    return Image.composite(right_img, left_img, mask)
++
++
 +def _safe_rgb(color):
 +    """把颜色统一成 (r, g, b) 整数三元组（纯色背景用，不压暗）"""
 +    try:
@@ -444,7 +493,7 @@ index 16ec1b7..c58618a 100644
  def _clamp(v, lo, hi):
      return max(lo, min(hi, v))
  
-@@ -68,12 +77,8 @@ def _wrap_english(draw, text, font, max_width):
+@@ -68,12 +89,8 @@ def _wrap_english(draw, text, font, max_width):
      return lines
  
  
@@ -458,15 +507,20 @@ index 16ec1b7..c58618a 100644
  
      if bg_color_config:
          tint = ColorHelper.get_background_color(
-@@ -85,6 +90,17 @@ def _prepare_bg(image_path, canvas_size, blur_size, color_ratio, bg_color_config
+@@ -85,6 +102,22 @@ def _prepare_bg(image_path, canvas_size, blur_size, color_ratio, bg_color_config
      else:
          dominant = find_dominant_vibrant_colors(src, num_colors=5)
          tint = dominant[0] if dominant else (120, 120, 120)
 +
-+    if str(bg_style or "blur").strip().lower() == "solid":
++    bg_mode = str(bg_style or "blur").strip().lower()
++    if bg_mode == "solid":
 +        # 纯色背景：所选颜色原样铺满（不模糊、不压暗、不加噪点）
 +        solid = _safe_rgb(tint)
 +        return Image.new("RGBA", canvas_size, solid + (255,)), solid
++
++    if bg_mode == "gradient":
++        # 纯色渐变：用所选颜色做左深右浅的横向渐变
++        return _gradient_bg(canvas_size[0], canvas_size[1], tint).convert("RGBA"), _safe_rgb(tint)
 +
 +    bg = ImageOps.fit(src, canvas_size, method=Image.Resampling.LANCZOS)
 +
@@ -476,7 +530,7 @@ index 16ec1b7..c58618a 100644
      tint = darken_color(tint, 0.82)
  
      ratio = float(color_ratio)
-@@ -176,6 +192,7 @@ def create_style_animated_4(
+@@ -176,6 +209,7 @@ def create_style_animated_4(
      animation_reduce_colors="strong",
      image_count=5,
      stop_event=None,
@@ -484,7 +538,7 @@ index 16ec1b7..c58618a 100644
  ):
      try:
          try:
-@@ -224,7 +241,7 @@ def create_style_animated_4(
+@@ -224,7 +258,7 @@ def create_style_animated_4(
          prepared_bg = []
          prepared_text = []
          for p in poster_paths:

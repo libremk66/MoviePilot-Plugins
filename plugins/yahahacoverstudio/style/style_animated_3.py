@@ -833,13 +833,18 @@ def create_style_animated_3(library_dir, title, font_path, font_size=(170,75), f
             gradient_color = get_poster_primary_color(first_image_path)
 
         # 直接在目标分辨率生成背景
-        if str(bg_style or "blur").strip().lower() == "solid":
+        bg_mode = str(bg_style or "blur").strip().lower()
+        if bg_mode == "solid":
             # 纯色背景：直接用所选颜色铺满，不压暗、不加噪点、不做左→右变白渐变
             solid_rgb = tuple(min(255, max(0, int(c))) for c in tuple(blur_color)[:3])
             if len(solid_rgb) < 3:
                 solid_rgb = (100, 100, 100)
             bg_img = Image.new("RGBA", (target_w, target_h), solid_rgb + (255,))
             logger.info(f"背景类型=纯色，使用颜色 {solid_rgb}")
+        elif bg_mode == "gradient":
+            # 纯色渐变：用所选颜色做左深右浅的横向渐变（插件原生「纯色渐变」同款）
+            bg_img = create_gradient_background(target_w, target_h, tuple(blur_color)[:3])
+            logger.info(f"背景类型=纯色渐变，基准颜色 {tuple(blur_color)[:3]}")
         elif is_blur:
             bg_img = create_blur_background(first_image_path, target_w, target_h, blur_color, blur_size * scale, color_ratio)
         else:

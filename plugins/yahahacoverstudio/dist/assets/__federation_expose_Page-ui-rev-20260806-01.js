@@ -7577,7 +7577,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
       animatedSettings.titleScale = clampFloat(source.title_scale ?? animatedSettings.titleScale, 0.2, 3, 1);
       animatedSettings.bgColorMode = ["auto", "custom", "config"].includes(String(source.bg_color_mode)) ? source.bg_color_mode : "auto";
       animatedSettings.customBgColor = String(source.custom_bg_color || animatedSettings.customBgColor || "");
-      animatedSettings.bgStyle = ["blur", "solid"].includes(String(source.bg_style)) ? source.bg_style : "blur";
+      animatedSettings.bgStyle = ["blur", "solid", "gradient"].includes(String(source.bg_style)) ? source.bg_style : "blur";
     }
     function syncRenderOptions(data) {
       if (!data) return;
@@ -7767,7 +7767,8 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
     ];
     const animatedBackgroundStyleItems = [
       { title: "模糊主图（混所选颜色）", value: "blur" },
-      { title: "纯色", value: "solid" }
+      { title: "纯色", value: "solid" },
+      { title: "纯色渐变（左深右浅）", value: "gradient" }
     ];
     const animatedBackgroundColorSourceItems = [
       { title: "从主图自动取色", value: "auto" },
@@ -9845,7 +9846,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                                             label: "背景类型",
                                             items: animatedBackgroundStyleItems
                                           }, null, 8, ["modelValue"]),
-                                          animatedSettings.bgStyle !== "solid" ? (_openBlock(), _createBlock(BlueprintRange, {
+                                          animatedSettings.bgStyle === "blur" ? (_openBlock(), _createBlock(BlueprintRange, {
                                             key: 0,
                                             modelValue: animatedSettings.blurSize,
                                             "onUpdate:modelValue": _cache[18] || (_cache[18] = ($event) => animatedSettings.blurSize = $event),
@@ -9854,7 +9855,7 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
                                             max: 100,
                                             step: 1
                                           }, null, 8, ["modelValue"])) : _createCommentVNode("", true),
-                                          animatedSettings.bgStyle !== "solid" ? (_openBlock(), _createBlock(BlueprintRange, {
+                                          animatedSettings.bgStyle === "blur" ? (_openBlock(), _createBlock(BlueprintRange, {
                                             key: 1,
                                             modelValue: animatedSettings.colorRatio,
                                             "onUpdate:modelValue": _cache[19] || (_cache[19] = ($event) => animatedSettings.colorRatio = $event),
@@ -10808,6 +10809,6 @@ const _sfc_main = /* @__PURE__ */ _defineComponent({
   }
 });
 
-const Page = /* @__PURE__ */ _export_sfc(_sfc_main, [["__scopeId", "data-v-6cd22de3"]]);
+const Page = /* @__PURE__ */ _export_sfc(_sfc_main, [["__scopeId", "data-v-eba9331d"]]);
 
 export { Page as default };

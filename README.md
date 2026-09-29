@@ -6,7 +6,7 @@
 |---|---|
 | [**实时硬链接+**（LinkMonitorPlus）](#实时硬链接linkmonitorplus) | 在 MoviePilot 内置「实时硬链接」基础上增加**已处理文件记录**，硬链被移动/入库后不再重复生成 |
 | [**柯南集数映射重命名**（ConanRename）](#柯南集数映射重命名conanrename) | 按银色子弹数据站(sbsub)的**权威映射**把拆分版集号改名为 TMDB 集号（自动 `-partN`、自动特辑） |
-| [**呀哈哈封面工坊**（YahahaCoverStudio）](#呀哈哈封面工坊yahahacoverstudio) | 第三方插件（作者 [呀哈哈](https://github.com/justzerock)）的**补丁版**：动态方案 1–4 也能各自设置「背景色来源」和「背景类型（纯色背景）」 |
+| [**呀哈哈封面工坊**（YahahaCoverStudio）](#呀哈哈封面工坊yahahacoverstudio) | 第三方插件（作者 [呀哈哈](https://github.com/justzerock)）的**补丁版**：动态方案 1–4 也能各自设置「背景色来源」和「背景类型（纯色 / 纯色渐变）」 |
 
 安装方式：MoviePilot → 设定 → 插件 → 添加插件仓库
 ```

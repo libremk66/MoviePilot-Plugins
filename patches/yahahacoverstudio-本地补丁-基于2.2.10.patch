@@ -1,0 +1,495 @@
+diff --git a/mcg_frontend/src/components/Page.vue b/mcg_frontend/src/components/Page.vue
+index 40ce64d..3544550 100644
+--- a/mcg_frontend/src/components/Page.vue
++++ b/mcg_frontend/src/components/Page.vue
+@@ -430,7 +430,13 @@
+                             :max="3"
+                             :step="0.05"
+                           />
++                          <BlueprintSelect
++                            v-model="animatedSettings.bgStyle"
++                            label="背景类型"
++                            :items="animatedBackgroundStyleItems"
++                          />
+                           <BlueprintRange
++                            v-if="animatedSettings.bgStyle !== 'solid'"
+                             v-model="animatedSettings.blurSize"
+                             label="背景模糊"
+                             :min="0"
+@@ -438,12 +444,25 @@
+                             :step="1"
+                           />
+                           <BlueprintRange
++                            v-if="animatedSettings.bgStyle !== 'solid'"
+                             v-model="animatedSettings.colorRatio"
+                             label="背景混色"
+                             :min="0"
+                             :max="1"
+                             :step="0.05"
+                           />
++                          <BlueprintSelect
++                            v-model="animatedSettings.bgColorMode"
++                            label="背景色来源"
++                            :items="animatedBackgroundColorSourceItems"
++                          />
++                          <BlueprintField
++                            v-if="animatedSettings.bgColorMode === 'custom'"
++                            :model-value="animatedSettings.customBgColor || defaultAnimatedBgColor"
++                            type="color"
++                            label="手动颜色"
++                            @update:model-value="(val) => (animatedSettings.customBgColor = String(val || defaultAnimatedBgColor))"
++                          />
+                           <BlueprintRange
+                             v-model="animatedSettings.animationDuration"
+                             label="动画时长"
+@@ -1384,7 +1403,11 @@ const animatedSettings = reactive({
+   blurSize: 50,
+   colorRatio: 0.8,
+   titleScale: 1,
++  bgColorMode: 'auto' as 'auto' | 'custom' | 'config',
++  customBgColor: '',
++  bgStyle: 'blur' as 'blur' | 'solid',
+ })
++const defaultAnimatedBgColor = getThemeColor('--mcr-cover-auto-blend')
+ 
+ const controlBayStyle = computed(() =>
+   previewBayHeight.value > 0
+@@ -1399,6 +1422,16 @@ const simulationParams = reactive<SimulationParams>({
+   customColor: getThemeColor('--mcr-cover-auto-blend'),
+ })
+ 
++// 动态方案的背景色来源改动后，同步到页面模拟预览，保证预览与生成一致
++watch(
++  () => [animatedSettings.bgColorMode, animatedSettings.customBgColor] as const,
++  () => {
++    if (!animatedSettingsPanelOpen.value) return
++    simulationParams.colorSource = animatedSettings.bgColorMode
++    simulationParams.customColor = animatedSettings.customBgColor || defaultAnimatedBgColor
++  },
++)
++
+ interface HistoryItem {
+   name: string
+   size: string
+@@ -2354,6 +2387,13 @@ function syncAnimatedSettings(data?: Partial<StatusPayload> | null, baseStyle: C
+   animatedSettings.blurSize = clampNumber(source.blur_size ?? animatedSettings.blurSize, 0, 100, 50)
+   animatedSettings.colorRatio = clampFloat(source.color_ratio ?? animatedSettings.colorRatio, 0, 1, 0.8)
+   animatedSettings.titleScale = clampFloat(source.title_scale ?? animatedSettings.titleScale, 0.2, 3, 1)
++  animatedSettings.bgColorMode = ['auto', 'custom', 'config'].includes(String(source.bg_color_mode))
++    ? source.bg_color_mode as 'auto' | 'custom' | 'config'
++    : 'auto'
++  animatedSettings.customBgColor = String(source.custom_bg_color || animatedSettings.customBgColor || '')
++  animatedSettings.bgStyle = ['blur', 'solid'].includes(String(source.bg_style))
++    ? source.bg_style as 'blur' | 'solid'
++    : 'blur'
+ }
+ 
+ function syncRenderOptions(data?: Partial<StatusPayload> | null) {
+@@ -2418,6 +2458,8 @@ async function openAnimatedSettings(item: SchemeListItem) {
+     await setCoverStyle(item.baseStyle, 'animated')
+   }
+   syncAnimatedSettings(null, item.baseStyle)
++  simulationParams.colorSource = animatedSettings.bgColorMode
++  simulationParams.customColor = animatedSettings.customBgColor || defaultAnimatedBgColor
+ }
+ 
+ async function saveAnimatedSettings() {
+@@ -2441,6 +2483,11 @@ async function saveAnimatedSettings() {
+       blur_size: animatedSettings.blurSize,
+       color_ratio: animatedSettings.colorRatio,
+       title_scale: animatedSettings.titleScale,
++      bg_color_mode: animatedSettings.bgColorMode,
++      custom_bg_color: animatedSettings.bgColorMode === 'custom'
++        ? (animatedSettings.customBgColor || defaultAnimatedBgColor)
++        : animatedSettings.customBgColor,
++      bg_style: animatedSettings.bgStyle,
+     }
+     const resp = await props.api.post<{
+       code: number
+@@ -2577,6 +2624,17 @@ const animatedDepartureItems = [
+   { title: '渐变', value: 'crossfade' },
+ ]
+ 
++const animatedBackgroundStyleItems = [
++  { title: '模糊主图（混所选颜色）', value: 'blur' },
++  { title: '纯色', value: 'solid' },
++]
++
++const animatedBackgroundColorSourceItems = [
++  { title: '从主图自动取色', value: 'auto' },
++  { title: '手动指定', value: 'custom' },
++  { title: '配置指定', value: 'config' },
++]
++
+ const animatedSettingsTitle = computed(() => {
+   const index = animatedSettingsBaseStyle.value.split('_')[1] || '1'
+   return `动态方案 ${index} 配置`
+diff --git a/mcg_frontend/src/types/plugin.ts b/mcg_frontend/src/types/plugin.ts
+index 4f0d424..cf9924b 100644
+--- a/mcg_frontend/src/types/plugin.ts
++++ b/mcg_frontend/src/types/plugin.ts
+@@ -114,6 +114,9 @@ export interface AnimatedStyleSettings {
+   blur_size?: number
+   color_ratio?: number
+   title_scale?: number
++  bg_color_mode?: 'auto' | 'custom' | 'config'
++  custom_bg_color?: string
++  bg_style?: 'blur' | 'solid'
+ }
+ 
+ export interface TemplateTransform {
+diff --git a/plugins.v2/yahahacoverstudio/__init__.py b/plugins.v2/yahahacoverstudio/__init__.py
+index 6990688..154dcc8 100644
+--- a/plugins.v2/yahahacoverstudio/__init__.py
++++ b/plugins.v2/yahahacoverstudio/__init__.py
+@@ -221,6 +221,8 @@ class YahahaCoverStudio(_PluginBase):
+     _animated_2_image_count = 6
+     _animated_2_departure_type = 'fly'
+     _animated_settings: Dict[str, Dict[str, Any]] = {}
++    _bg_color_mode = 'auto'
++    _custom_bg_color = ''
+     _style_naming_v2 = True
+     _sanitize_log_cache = set()
+     _clean_images = False
+@@ -262,7 +264,10 @@ class YahahaCoverStudio(_PluginBase):
+ 
+     def init_plugin(self, config: dict = None):
+         self.mschain = MediaServerChain()
+-        self.mediaserver_helper = MediaServerHelper()   
++        self.mediaserver_helper = MediaServerHelper()
++        # 插件启动/重载时清掉上一次"停止任务"留下的停止标志：
++        # 它会让之后的动图预览被误判为"检测到停止信号，跳过动图生成"
++        self._event.clear()
+         data_path = self.get_data_path()
+         (data_path / 'fonts').mkdir(parents=True, exist_ok=True)
+         (data_path / 'input').mkdir(parents=True, exist_ok=True)
+@@ -670,6 +675,11 @@ class YahahaCoverStudio(_PluginBase):
+                 "title_scale[default]",
+                 float,
+             ),
++            # 背景色来源：动态方案可单独设置，默认沿用全局配置
++            "bg_color_mode": self._bg_color_mode if self._bg_color_mode in ["auto", "custom", "config"] else "auto",
++            "custom_bg_color": self._custom_bg_color or "",
++            # 背景类型：blur=模糊主图混合所选颜色（原行为），solid=纯色（用所选颜色原样铺满）
++            "bg_style": "blur",
+         }
+ 
+     def __normalize_animated_setting(
+@@ -759,6 +769,13 @@ class YahahaCoverStudio(_PluginBase):
+                 "title_scale[style]",
+                 float,
+             ),
++            "bg_color_mode": str(raw.get("bg_color_mode", base.get("bg_color_mode", "auto")) or "auto").strip().lower()
++            if str(raw.get("bg_color_mode", base.get("bg_color_mode", "auto")) or "auto").strip().lower() in ["auto", "custom", "config"]
++            else "auto",
++            "custom_bg_color": str(raw.get("custom_bg_color", base.get("custom_bg_color", "")) or "").strip(),
++            "bg_style": str(raw.get("bg_style", base.get("bg_style", "blur")) or "blur").strip().lower()
++            if str(raw.get("bg_style", base.get("bg_style", "blur")) or "blur").strip().lower() in ["blur", "solid"]
++            else "blur",
+         }
+ 
+     def __normalize_animated_settings_map(self, settings: Optional[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+@@ -4463,6 +4480,9 @@ class YahahaCoverStudio(_PluginBase):
+                     "blur_size": active_animated_settings["blur_size"],
+                     "color_ratio": active_animated_settings["color_ratio"],
+                     "title_scale": active_animated_settings["title_scale"],
++                    "bg_color_mode": active_animated_settings["bg_color_mode"],
++                    "custom_bg_color": active_animated_settings["custom_bg_color"],
++                    "bg_style": active_animated_settings["bg_style"],
+                     "animated_settings": animated_settings,
+                     **preview_custom_static,
+                 },
+@@ -5600,6 +5620,13 @@ class YahahaCoverStudio(_PluginBase):
+         old_style = self._cover_style
+         old_layout = self._custom_static_layout
+         old_templates = self._custom_static_layouts
++        # 预览不应被上一次「停止任务」遗留的标志影响（MP 重载/停止插件后会触发一次 stop_task），
++        # 但真有生成任务在跑时不动它，避免把用户的停止请求吞掉
++        try:
++            if not self.__is_generation_running():
++                self._event.clear()
++        except Exception:
++            pass
+         try:
+             payload = self.__extract_request_payload(data=data, kwargs=kwargs)
+             target_style = (style or payload.get("style") or "").strip()
+@@ -6000,6 +6027,9 @@ class YahahaCoverStudio(_PluginBase):
+                     "blur_size": active_settings["blur_size"],
+                     "color_ratio": active_settings["color_ratio"],
+                     "title_scale": active_settings["title_scale"],
++                    "bg_color_mode": active_settings["bg_color_mode"],
++                    "custom_bg_color": active_settings["custom_bg_color"],
++                    "bg_style": active_settings["bg_style"],
+                     "animated_settings": animated_settings,
+                 },
+             }
+@@ -8745,9 +8775,19 @@ class YahahaCoverStudio(_PluginBase):
+         logger.info(f"当前分辨率配置: {self._resolution_config}")
+ 
+         # 准备背景颜色配置
++        # 动态方案支持按方案单独设置背景色来源（未设置时已在归一化阶段继承全局配置）
++        bg_color_mode = self._bg_color_mode
++        custom_bg_color = self._custom_bg_color
++        if self._cover_style.startswith("animated") and animated_runtime_settings:
++            style_mode = str(animated_runtime_settings.get("bg_color_mode") or "").strip().lower()
++            if style_mode in ["auto", "custom", "config"]:
++                bg_color_mode = style_mode
++            style_custom_color = str(animated_runtime_settings.get("custom_bg_color") or "").strip()
++            if style_custom_color:
++                custom_bg_color = style_custom_color
+         bg_color_config = {
+-            'mode': self._bg_color_mode,
+-            'custom_color': self._custom_bg_color,
++            'mode': bg_color_mode,
++            'custom_color': custom_bg_color,
+             'config_color': config_bg_color
+         }
+         preset_image_input = image_paths if len(image_paths) > 1 else primary_image_path
+@@ -8868,6 +8908,7 @@ class YahahaCoverStudio(_PluginBase):
+                                                     animation_format=animated_runtime_settings["animation_format"],
+                                                     animation_resolution=anim_res,
+                                                     animation_reduce_colors=animated_runtime_settings["animation_reduce_colors"],
++                                                    bg_style=animated_runtime_settings.get("bg_style", "blur"),
+                                                     stop_event=self._event)
+         elif self._cover_style == 'animated_1':
+             # 动态封面强制使用 320x180 分辨率以保证性能
+@@ -8903,6 +8944,7 @@ class YahahaCoverStudio(_PluginBase):
+                                                     animation_reduce_colors=animated_runtime_settings["animation_reduce_colors"],
+                                                     image_count=animated_2_image_count,
+                                                     departure_type=animated_runtime_settings["animated_2_departure_type"],
++                                                    bg_style=animated_runtime_settings.get("bg_style", "blur"),
+                                                     stop_event=self._event)
+         elif self._cover_style == 'animated_2':
+             # 动态封面强制使用 320x180 分辨率以保证性能
+@@ -8934,6 +8976,7 @@ class YahahaCoverStudio(_PluginBase):
+                                                     animation_resolution=anim_res,
+                                                     animation_reduce_colors=animated_runtime_settings["animation_reduce_colors"],
+                                                     image_count=int(animated_runtime_settings["animated_2_image_count"]),
++                                                    bg_style=animated_runtime_settings.get("bg_style", "blur"),
+                                                     stop_event=self._event)
+         elif self._cover_style == 'animated_4':
+             anim_res = '320x180'
+@@ -8966,6 +9009,7 @@ class YahahaCoverStudio(_PluginBase):
+                                                     animation_resolution=anim_res,
+                                                     animation_reduce_colors=animated_runtime_settings["animation_reduce_colors"],
+                                                     image_count=animated_2_image_count,
++                                                    bg_style=animated_runtime_settings.get("bg_style", "blur"),
+                                                     stop_event=self._event)
+         return image_data
+     
+diff --git a/plugins.v2/yahahacoverstudio/style/style_animated_1.py b/plugins.v2/yahahacoverstudio/style/style_animated_1.py
+index 3f60868..f866dc8 100644
+--- a/plugins.v2/yahahacoverstudio/style/style_animated_1.py
++++ b/plugins.v2/yahahacoverstudio/style/style_animated_1.py
+@@ -19,6 +19,15 @@ def darken_color(color, factor=0.7):
+     return (int(color[0] * factor), int(color[1] * factor), int(color[2] * factor))
+ 
+ 
++def _safe_rgb(color):
++    """把颜色统一成 (r, g, b) 整数三元组（纯色背景用，不压暗）"""
++    try:
++        values = tuple(int(min(255, max(0, float(c)))) for c in tuple(color)[:3])
++        return values if len(values) == 3 else (100, 100, 100)
++    except Exception:
++        return (100, 100, 100)
++
++
+ def add_film_grain(image, intensity=0.03):
+     img_array = np.array(image, dtype=np.float32)
+     noise = np.random.normal(0, intensity * 255, img_array.shape)
+@@ -312,6 +321,7 @@ def create_style_animated_1(
+     image_count=5,
+     departure_type="fly",
+     stop_event=None,
++    bg_style="blur",
+ ):
+     def _animate_background(bg_base_rgba, phase, duration_seconds):
+         phase = _clamp(phase, 0.0, 1.0)
+@@ -445,6 +455,7 @@ def create_style_animated_1(
+             return False
+ 
+         logger.info("正在提取色彩与合成背景...")
++        solid_bg = str(bg_style or "blur").strip().lower() == "solid"
+         # 为每张卡片预生成背景，确保顶层切换时背景同步变化
+         bg_bases_rgba = []
+         for img in images:
+@@ -462,14 +473,18 @@ def create_style_animated_1(
+                 base_color = vibrant_colors[0] if vibrant_colors else (100, 100, 100)
+             bg_color = darken_color(base_color, 0.85)
+ 
+-            bg_img = ImageOps.fit(img, (target_w, target_h), method=Image.Resampling.BICUBIC)
+-            bg_img = bg_img.filter(ImageFilter.GaussianBlur(radius=int(blur_size * scale)))
+-            bg_img = Image.blend(
+-                bg_img.convert("RGB"),
+-                Image.new("RGB", (target_w, target_h), bg_color),
+-                color_ratio,
+-            )
+-            bg_img = add_film_grain(bg_img, 0.03)
++            if solid_bg:
++                # 纯色背景：所选颜色原样铺满（不压暗、不加噪点）
++                bg_img = Image.new("RGB", (target_w, target_h), _safe_rgb(base_color))
++            else:
++                bg_img = ImageOps.fit(img, (target_w, target_h), method=Image.Resampling.BICUBIC)
++                bg_img = bg_img.filter(ImageFilter.GaussianBlur(radius=int(blur_size * scale)))
++                bg_img = Image.blend(
++                    bg_img.convert("RGB"),
++                    Image.new("RGB", (target_w, target_h), bg_color),
++                    color_ratio,
++                )
++                bg_img = add_film_grain(bg_img, 0.03)
+             bg_bases_rgba.append(bg_img.convert("RGBA"))
+ 
+         # 文本阴影主色使用第一张图的背景色系
+diff --git a/plugins.v2/yahahacoverstudio/style/style_animated_2.py b/plugins.v2/yahahacoverstudio/style/style_animated_2.py
+index 8b020b3..2ce2d08 100644
+--- a/plugins.v2/yahahacoverstudio/style/style_animated_2.py
++++ b/plugins.v2/yahahacoverstudio/style/style_animated_2.py
+@@ -19,6 +19,15 @@ from app.plugins.yahahacoverstudio.style.style_static_2 import (
+ from app.plugins.yahahacoverstudio.utils.color_helper import ColorHelper
+ 
+ 
++def _safe_rgb(color):
++    """把颜色统一成 (r, g, b) 整数三元组（纯色背景用，不压暗）"""
++    try:
++        values = tuple(int(min(255, max(0, float(c)))) for c in tuple(color)[:3])
++        return values if len(values) == 3 else (100, 100, 100)
++    except Exception:
++        return (100, 100, 100)
++
++
+ def _clamp(v, lo, hi):
+     return max(lo, min(hi, v))
+ 
+@@ -207,6 +216,7 @@ def create_style_animated_2(
+     animation_reduce_colors="strong",
+     image_count=9,
+     stop_event=None,
++    bg_style="blur",
+ ):
+     try:
+         try:
+@@ -273,10 +283,14 @@ def create_style_animated_2(
+             else:
+                 colors = find_dominant_vibrant_colors(src, num_colors=5)
+                 bg_color = colors[0] if colors else (120, 120, 120)
+-            bg_img = ImageOps.fit(src, (target_w, target_h), method=Image.Resampling.BICUBIC)
+-            bg_img = bg_img.filter(ImageFilter.GaussianBlur(radius=max(1, int(blur_size * target_h / 1080.0))))
+-            bg_mix = Image.blend(bg_img, Image.new("RGB", (target_w, target_h), darken_color(bg_color, 0.85)), float(_clamp(float(color_ratio), 0.0, 1.0)))
+-            bg_mix = add_film_grain(bg_mix, intensity=0.03)
++            if str(bg_style or "blur").strip().lower() == "solid":
++                # 纯色背景：所选颜色原样铺满（不压暗、不加噪点）
++                bg_mix = Image.new("RGB", (target_w, target_h), _safe_rgb(bg_color))
++            else:
++                bg_img = ImageOps.fit(src, (target_w, target_h), method=Image.Resampling.BICUBIC)
++                bg_img = bg_img.filter(ImageFilter.GaussianBlur(radius=max(1, int(blur_size * target_h / 1080.0))))
++                bg_mix = Image.blend(bg_img, Image.new("RGB", (target_w, target_h), darken_color(bg_color, 0.85)), float(_clamp(float(color_ratio), 0.0, 1.0)))
++                bg_mix = add_film_grain(bg_mix, intensity=0.03)
+             prepared_left_bg.append(bg_mix.convert("RGBA"))
+ 
+             prepared_text.append(_build_text_layer((target_w, target_h), title, font_path, font_size, font_offset, bg_color))
+diff --git a/plugins.v2/yahahacoverstudio/style/style_animated_3.py b/plugins.v2/yahahacoverstudio/style/style_animated_3.py
+index 9f920ec..fd5664e 100644
+--- a/plugins.v2/yahahacoverstudio/style/style_animated_3.py
++++ b/plugins.v2/yahahacoverstudio/style/style_animated_3.py
+@@ -759,11 +759,11 @@ def add_film_grain(image, intensity=0.05):
+     
+     return Image.fromarray(img_array)
+ 
+-def create_style_animated_3(library_dir, title, font_path, font_size=(170,75), font_offset=(0,40,40), 
+-                           is_blur=False, blur_size=50, color_ratio=0.8, resolution_config=None, 
+-                           bg_color_config=None, animation_duration=12, animation_scroll='down', 
+-                           animation_fps=15, animation_format='apng', animation_resolution='300x200', 
+-                           animation_reduce_colors='strong', stop_event=None):
++def create_style_animated_3(library_dir, title, font_path, font_size=(170,75), font_offset=(0,40,40),
++                           is_blur=False, blur_size=50, color_ratio=0.8, resolution_config=None,
++                           bg_color_config=None, animation_duration=12, animation_scroll='down',
++                           animation_fps=15, animation_format='apng', animation_resolution='300x200',
++                           animation_reduce_colors='strong', stop_event=None, bg_style='blur'):
+     """
+     生成多图滚动的动图 (GIF/WebP)，通过 ffmpeg 合成
+     已优化版：在目标分辨率下直接合成，预处理旋转和文字，效率提升约 5-8 倍。
+@@ -833,7 +833,14 @@ def create_style_animated_3(library_dir, title, font_path, font_size=(170,75), f
+             gradient_color = get_poster_primary_color(first_image_path)
+ 
+         # 直接在目标分辨率生成背景
+-        if is_blur:
++        if str(bg_style or "blur").strip().lower() == "solid":
++            # 纯色背景：直接用所选颜色铺满，不压暗、不加噪点、不做左→右变白渐变
++            solid_rgb = tuple(min(255, max(0, int(c))) for c in tuple(blur_color)[:3])
++            if len(solid_rgb) < 3:
++                solid_rgb = (100, 100, 100)
++            bg_img = Image.new("RGBA", (target_w, target_h), solid_rgb + (255,))
++            logger.info(f"背景类型=纯色，使用颜色 {solid_rgb}")
++        elif is_blur:
+             bg_img = create_blur_background(first_image_path, target_w, target_h, blur_color, blur_size * scale, color_ratio)
+         else:
+             bg_img = create_gradient_background(target_w, target_h, gradient_color)
+diff --git a/plugins.v2/yahahacoverstudio/style/style_animated_4.py b/plugins.v2/yahahacoverstudio/style/style_animated_4.py
+index 16ec1b7..c58618a 100644
+--- a/plugins.v2/yahahacoverstudio/style/style_animated_4.py
++++ b/plugins.v2/yahahacoverstudio/style/style_animated_4.py
+@@ -18,6 +18,15 @@ from app.plugins.yahahacoverstudio.style.style_static_2 import (
+ from app.plugins.yahahacoverstudio.utils.color_helper import ColorHelper
+ 
+ 
++def _safe_rgb(color):
++    """把颜色统一成 (r, g, b) 整数三元组（纯色背景用，不压暗）"""
++    try:
++        values = tuple(int(min(255, max(0, float(c)))) for c in tuple(color)[:3])
++        return values if len(values) == 3 else (100, 100, 100)
++    except Exception:
++        return (100, 100, 100)
++
++
+ def _clamp(v, lo, hi):
+     return max(lo, min(hi, v))
+ 
+@@ -68,12 +77,8 @@ def _wrap_english(draw, text, font, max_width):
+     return lines
+ 
+ 
+-def _prepare_bg(image_path, canvas_size, blur_size, color_ratio, bg_color_config=None):
++def _prepare_bg(image_path, canvas_size, blur_size, color_ratio, bg_color_config=None, bg_style="blur"):
+     src = Image.open(image_path).convert("RGB")
+-    bg = ImageOps.fit(src, canvas_size, method=Image.Resampling.LANCZOS)
+-
+-    scaled_blur = int(max(8, float(blur_size) * (canvas_size[1] / 1080.0)))
+-    bg = bg.filter(ImageFilter.GaussianBlur(radius=scaled_blur))
+ 
+     if bg_color_config:
+         tint = ColorHelper.get_background_color(
+@@ -85,6 +90,17 @@ def _prepare_bg(image_path, canvas_size, blur_size, color_ratio, bg_color_config
+     else:
+         dominant = find_dominant_vibrant_colors(src, num_colors=5)
+         tint = dominant[0] if dominant else (120, 120, 120)
++
++    if str(bg_style or "blur").strip().lower() == "solid":
++        # 纯色背景：所选颜色原样铺满（不模糊、不压暗、不加噪点）
++        solid = _safe_rgb(tint)
++        return Image.new("RGBA", canvas_size, solid + (255,)), solid
++
++    bg = ImageOps.fit(src, canvas_size, method=Image.Resampling.LANCZOS)
++
++    scaled_blur = int(max(8, float(blur_size) * (canvas_size[1] / 1080.0)))
++    bg = bg.filter(ImageFilter.GaussianBlur(radius=scaled_blur))
++
+     tint = darken_color(tint, 0.82)
+ 
+     ratio = float(color_ratio)
+@@ -176,6 +192,7 @@ def create_style_animated_4(
+     animation_reduce_colors="strong",
+     image_count=5,
+     stop_event=None,
++    bg_style="blur",
+ ):
+     try:
+         try:
+@@ -224,7 +241,7 @@ def create_style_animated_4(
+         prepared_bg = []
+         prepared_text = []
+         for p in poster_paths:
+-            bg, tint = _prepare_bg(p, canvas_size, blur_size, color_ratio, bg_color_config)
++            bg, tint = _prepare_bg(p, canvas_size, blur_size, color_ratio, bg_color_config, bg_style)
+             prepared_bg.append(bg)
+             prepared_text.append(_build_text_layer(canvas_size, title, font_path, scaled_font_size, scaled_font_offset, tint))
+ 

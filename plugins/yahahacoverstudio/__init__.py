@@ -127,7 +127,7 @@ class YahahaCoverStudio(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/justzerock/MoviePilot-Plugins/main/icons/yahaha-cover-studio.png"
     # 插件版本
-    plugin_version = "2.2.10.1"
+    plugin_version = "2.2.10.2"
     # 插件作者
     plugin_author = "呀哈哈"
     # 作者主页
@@ -264,7 +264,10 @@ class YahahaCoverStudio(_PluginBase):
 
     def init_plugin(self, config: dict = None):
         self.mschain = MediaServerChain()
-        self.mediaserver_helper = MediaServerHelper()   
+        self.mediaserver_helper = MediaServerHelper()
+        # 插件启动/重载时清掉上一次"停止任务"留下的停止标志：
+        # 它会让之后的动图预览被误判为"检测到停止信号，跳过动图生成"
+        self._event.clear()
         data_path = self.get_data_path()
         (data_path / 'fonts').mkdir(parents=True, exist_ok=True)
         (data_path / 'input').mkdir(parents=True, exist_ok=True)
@@ -675,6 +678,8 @@ class YahahaCoverStudio(_PluginBase):
             # 背景色来源：动态方案可单独设置，默认沿用全局配置
             "bg_color_mode": self._bg_color_mode if self._bg_color_mode in ["auto", "custom", "config"] else "auto",
             "custom_bg_color": self._custom_bg_color or "",
+            # 背景类型：blur=模糊主图混合所选颜色（原行为），solid=纯色（用所选颜色原样铺满）
+            "bg_style": "blur",
         }
 
     def __normalize_animated_setting(
@@ -768,6 +773,9 @@ class YahahaCoverStudio(_PluginBase):
             if str(raw.get("bg_color_mode", base.get("bg_color_mode", "auto")) or "auto").strip().lower() in ["auto", "custom", "config"]
             else "auto",
             "custom_bg_color": str(raw.get("custom_bg_color", base.get("custom_bg_color", "")) or "").strip(),
+            "bg_style": str(raw.get("bg_style", base.get("bg_style", "blur")) or "blur").strip().lower()
+            if str(raw.get("bg_style", base.get("bg_style", "blur")) or "blur").strip().lower() in ["blur", "solid"]
+            else "blur",
         }
 
     def __normalize_animated_settings_map(self, settings: Optional[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
@@ -4474,6 +4482,7 @@ class YahahaCoverStudio(_PluginBase):
                     "title_scale": active_animated_settings["title_scale"],
                     "bg_color_mode": active_animated_settings["bg_color_mode"],
                     "custom_bg_color": active_animated_settings["custom_bg_color"],
+                    "bg_style": active_animated_settings["bg_style"],
                     "animated_settings": animated_settings,
                     **preview_custom_static,
                 },
@@ -5611,6 +5620,13 @@ class YahahaCoverStudio(_PluginBase):
         old_style = self._cover_style
         old_layout = self._custom_static_layout
         old_templates = self._custom_static_layouts
+        # 预览不应被上一次「停止任务」遗留的标志影响（MP 重载/停止插件后会触发一次 stop_task），
+        # 但真有生成任务在跑时不动它，避免把用户的停止请求吞掉
+        try:
+            if not self.__is_generation_running():
+                self._event.clear()
+        except Exception:
+            pass
         try:
             payload = self.__extract_request_payload(data=data, kwargs=kwargs)
             target_style = (style or payload.get("style") or "").strip()
@@ -6013,6 +6029,7 @@ class YahahaCoverStudio(_PluginBase):
                     "title_scale": active_settings["title_scale"],
                     "bg_color_mode": active_settings["bg_color_mode"],
                     "custom_bg_color": active_settings["custom_bg_color"],
+                    "bg_style": active_settings["bg_style"],
                     "animated_settings": animated_settings,
                 },
             }
@@ -8891,6 +8908,7 @@ class YahahaCoverStudio(_PluginBase):
                                                     animation_format=animated_runtime_settings["animation_format"],
                                                     animation_resolution=anim_res,
                                                     animation_reduce_colors=animated_runtime_settings["animation_reduce_colors"],
+                                                    bg_style=animated_runtime_settings.get("bg_style", "blur"),
                                                     stop_event=self._event)
         elif self._cover_style == 'animated_1':
             # 动态封面强制使用 320x180 分辨率以保证性能
@@ -8926,6 +8944,7 @@ class YahahaCoverStudio(_PluginBase):
                                                     animation_reduce_colors=animated_runtime_settings["animation_reduce_colors"],
                                                     image_count=animated_2_image_count,
                                                     departure_type=animated_runtime_settings["animated_2_departure_type"],
+                                                    bg_style=animated_runtime_settings.get("bg_style", "blur"),
                                                     stop_event=self._event)
         elif self._cover_style == 'animated_2':
             # 动态封面强制使用 320x180 分辨率以保证性能
@@ -8957,6 +8976,7 @@ class YahahaCoverStudio(_PluginBase):
                                                     animation_resolution=anim_res,
                                                     animation_reduce_colors=animated_runtime_settings["animation_reduce_colors"],
                                                     image_count=int(animated_runtime_settings["animated_2_image_count"]),
+                                                    bg_style=animated_runtime_settings.get("bg_style", "blur"),
                                                     stop_event=self._event)
         elif self._cover_style == 'animated_4':
             anim_res = '320x180'
@@ -8989,6 +9009,7 @@ class YahahaCoverStudio(_PluginBase):
                                                     animation_resolution=anim_res,
                                                     animation_reduce_colors=animated_runtime_settings["animation_reduce_colors"],
                                                     image_count=animated_2_image_count,
+                                                    bg_style=animated_runtime_settings.get("bg_style", "blur"),
                                                     stop_event=self._event)
         return image_data
     

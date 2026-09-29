@@ -19,6 +19,15 @@ from app.plugins.yahahacoverstudio.style.style_static_2 import (
 from app.plugins.yahahacoverstudio.utils.color_helper import ColorHelper
 
 
+def _safe_rgb(color):
+    """把颜色统一成 (r, g, b) 整数三元组（纯色背景用，不压暗）"""
+    try:
+        values = tuple(int(min(255, max(0, float(c)))) for c in tuple(color)[:3])
+        return values if len(values) == 3 else (100, 100, 100)
+    except Exception:
+        return (100, 100, 100)
+
+
 def _clamp(v, lo, hi):
     return max(lo, min(hi, v))
 
@@ -207,6 +216,7 @@ def create_style_animated_2(
     animation_reduce_colors="strong",
     image_count=9,
     stop_event=None,
+    bg_style="blur",
 ):
     try:
         try:
@@ -273,10 +283,14 @@ def create_style_animated_2(
             else:
                 colors = find_dominant_vibrant_colors(src, num_colors=5)
                 bg_color = colors[0] if colors else (120, 120, 120)
-            bg_img = ImageOps.fit(src, (target_w, target_h), method=Image.Resampling.BICUBIC)
-            bg_img = bg_img.filter(ImageFilter.GaussianBlur(radius=max(1, int(blur_size * target_h / 1080.0))))
-            bg_mix = Image.blend(bg_img, Image.new("RGB", (target_w, target_h), darken_color(bg_color, 0.85)), float(_clamp(float(color_ratio), 0.0, 1.0)))
-            bg_mix = add_film_grain(bg_mix, intensity=0.03)
+            if str(bg_style or "blur").strip().lower() == "solid":
+                # 纯色背景：所选颜色原样铺满（不压暗、不加噪点）
+                bg_mix = Image.new("RGB", (target_w, target_h), _safe_rgb(bg_color))
+            else:
+                bg_img = ImageOps.fit(src, (target_w, target_h), method=Image.Resampling.BICUBIC)
+                bg_img = bg_img.filter(ImageFilter.GaussianBlur(radius=max(1, int(blur_size * target_h / 1080.0))))
+                bg_mix = Image.blend(bg_img, Image.new("RGB", (target_w, target_h), darken_color(bg_color, 0.85)), float(_clamp(float(color_ratio), 0.0, 1.0)))
+                bg_mix = add_film_grain(bg_mix, intensity=0.03)
             prepared_left_bg.append(bg_mix.convert("RGBA"))
 
             prepared_text.append(_build_text_layer((target_w, target_h), title, font_path, font_size, font_offset, bg_color))

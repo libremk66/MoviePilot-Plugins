@@ -19,6 +19,15 @@ def darken_color(color, factor=0.7):
     return (int(color[0] * factor), int(color[1] * factor), int(color[2] * factor))
 
 
+def _safe_rgb(color):
+    """把颜色统一成 (r, g, b) 整数三元组（纯色背景用，不压暗）"""
+    try:
+        values = tuple(int(min(255, max(0, float(c)))) for c in tuple(color)[:3])
+        return values if len(values) == 3 else (100, 100, 100)
+    except Exception:
+        return (100, 100, 100)
+
+
 def add_film_grain(image, intensity=0.03):
     img_array = np.array(image, dtype=np.float32)
     noise = np.random.normal(0, intensity * 255, img_array.shape)
@@ -312,6 +321,7 @@ def create_style_animated_1(
     image_count=5,
     departure_type="fly",
     stop_event=None,
+    bg_style="blur",
 ):
     def _animate_background(bg_base_rgba, phase, duration_seconds):
         phase = _clamp(phase, 0.0, 1.0)
@@ -445,6 +455,7 @@ def create_style_animated_1(
             return False
 
         logger.info("正在提取色彩与合成背景...")
+        solid_bg = str(bg_style or "blur").strip().lower() == "solid"
         # 为每张卡片预生成背景，确保顶层切换时背景同步变化
         bg_bases_rgba = []
         for img in images:
@@ -462,14 +473,18 @@ def create_style_animated_1(
                 base_color = vibrant_colors[0] if vibrant_colors else (100, 100, 100)
             bg_color = darken_color(base_color, 0.85)
 
-            bg_img = ImageOps.fit(img, (target_w, target_h), method=Image.Resampling.BICUBIC)
-            bg_img = bg_img.filter(ImageFilter.GaussianBlur(radius=int(blur_size * scale)))
-            bg_img = Image.blend(
-                bg_img.convert("RGB"),
-                Image.new("RGB", (target_w, target_h), bg_color),
-                color_ratio,
-            )
-            bg_img = add_film_grain(bg_img, 0.03)
+            if solid_bg:
+                # 纯色背景：所选颜色原样铺满（不压暗、不加噪点）
+                bg_img = Image.new("RGB", (target_w, target_h), _safe_rgb(base_color))
+            else:
+                bg_img = ImageOps.fit(img, (target_w, target_h), method=Image.Resampling.BICUBIC)
+                bg_img = bg_img.filter(ImageFilter.GaussianBlur(radius=int(blur_size * scale)))
+                bg_img = Image.blend(
+                    bg_img.convert("RGB"),
+                    Image.new("RGB", (target_w, target_h), bg_color),
+                    color_ratio,
+                )
+                bg_img = add_film_grain(bg_img, 0.03)
             bg_bases_rgba.append(bg_img.convert("RGBA"))
 
         # 文本阴影主色使用第一张图的背景色系

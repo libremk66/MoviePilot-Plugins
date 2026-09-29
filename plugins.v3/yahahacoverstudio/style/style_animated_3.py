@@ -759,11 +759,11 @@ def add_film_grain(image, intensity=0.05):
     
     return Image.fromarray(img_array)
 
-def create_style_animated_3(library_dir, title, font_path, font_size=(170,75), font_offset=(0,40,40), 
-                           is_blur=False, blur_size=50, color_ratio=0.8, resolution_config=None, 
-                           bg_color_config=None, animation_duration=12, animation_scroll='down', 
-                           animation_fps=15, animation_format='apng', animation_resolution='300x200', 
-                           animation_reduce_colors='strong', stop_event=None):
+def create_style_animated_3(library_dir, title, font_path, font_size=(170,75), font_offset=(0,40,40),
+                           is_blur=False, blur_size=50, color_ratio=0.8, resolution_config=None,
+                           bg_color_config=None, animation_duration=12, animation_scroll='down',
+                           animation_fps=15, animation_format='apng', animation_resolution='300x200',
+                           animation_reduce_colors='strong', stop_event=None, bg_style='blur'):
     """
     生成多图滚动的动图 (GIF/WebP)，通过 ffmpeg 合成
     已优化版：在目标分辨率下直接合成，预处理旋转和文字，效率提升约 5-8 倍。
@@ -833,7 +833,14 @@ def create_style_animated_3(library_dir, title, font_path, font_size=(170,75), f
             gradient_color = get_poster_primary_color(first_image_path)
 
         # 直接在目标分辨率生成背景
-        if is_blur:
+        if str(bg_style or "blur").strip().lower() == "solid":
+            # 纯色背景：直接用所选颜色铺满，不压暗、不加噪点、不做左→右变白渐变
+            solid_rgb = tuple(min(255, max(0, int(c))) for c in tuple(blur_color)[:3])
+            if len(solid_rgb) < 3:
+                solid_rgb = (100, 100, 100)
+            bg_img = Image.new("RGBA", (target_w, target_h), solid_rgb + (255,))
+            logger.info(f"背景类型=纯色，使用颜色 {solid_rgb}")
+        elif is_blur:
             bg_img = create_blur_background(first_image_path, target_w, target_h, blur_color, blur_size * scale, color_ratio)
         else:
             bg_img = create_gradient_background(target_w, target_h, gradient_color)

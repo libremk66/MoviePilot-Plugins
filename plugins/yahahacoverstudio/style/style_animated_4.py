@@ -18,6 +18,15 @@ from app.plugins.yahahacoverstudio.style.style_static_2 import (
 from app.plugins.yahahacoverstudio.utils.color_helper import ColorHelper
 
 
+def _safe_rgb(color):
+    """把颜色统一成 (r, g, b) 整数三元组（纯色背景用，不压暗）"""
+    try:
+        values = tuple(int(min(255, max(0, float(c)))) for c in tuple(color)[:3])
+        return values if len(values) == 3 else (100, 100, 100)
+    except Exception:
+        return (100, 100, 100)
+
+
 def _clamp(v, lo, hi):
     return max(lo, min(hi, v))
 
@@ -68,12 +77,8 @@ def _wrap_english(draw, text, font, max_width):
     return lines
 
 
-def _prepare_bg(image_path, canvas_size, blur_size, color_ratio, bg_color_config=None):
+def _prepare_bg(image_path, canvas_size, blur_size, color_ratio, bg_color_config=None, bg_style="blur"):
     src = Image.open(image_path).convert("RGB")
-    bg = ImageOps.fit(src, canvas_size, method=Image.Resampling.LANCZOS)
-
-    scaled_blur = int(max(8, float(blur_size) * (canvas_size[1] / 1080.0)))
-    bg = bg.filter(ImageFilter.GaussianBlur(radius=scaled_blur))
 
     if bg_color_config:
         tint = ColorHelper.get_background_color(
@@ -85,6 +90,17 @@ def _prepare_bg(image_path, canvas_size, blur_size, color_ratio, bg_color_config
     else:
         dominant = find_dominant_vibrant_colors(src, num_colors=5)
         tint = dominant[0] if dominant else (120, 120, 120)
+
+    if str(bg_style or "blur").strip().lower() == "solid":
+        # 纯色背景：所选颜色原样铺满（不模糊、不压暗、不加噪点）
+        solid = _safe_rgb(tint)
+        return Image.new("RGBA", canvas_size, solid + (255,)), solid
+
+    bg = ImageOps.fit(src, canvas_size, method=Image.Resampling.LANCZOS)
+
+    scaled_blur = int(max(8, float(blur_size) * (canvas_size[1] / 1080.0)))
+    bg = bg.filter(ImageFilter.GaussianBlur(radius=scaled_blur))
+
     tint = darken_color(tint, 0.82)
 
     ratio = float(color_ratio)
@@ -176,6 +192,7 @@ def create_style_animated_4(
     animation_reduce_colors="strong",
     image_count=5,
     stop_event=None,
+    bg_style="blur",
 ):
     try:
         try:
@@ -224,7 +241,7 @@ def create_style_animated_4(
         prepared_bg = []
         prepared_text = []
         for p in poster_paths:
-            bg, tint = _prepare_bg(p, canvas_size, blur_size, color_ratio, bg_color_config)
+            bg, tint = _prepare_bg(p, canvas_size, blur_size, color_ratio, bg_color_config, bg_style)
             prepared_bg.append(bg)
             prepared_text.append(_build_text_layer(canvas_size, title, font_path, scaled_font_size, scaled_font_offset, tint))
 

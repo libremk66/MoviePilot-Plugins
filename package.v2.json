@@ -1,0 +1,16 @@
+{
+  "LinkMonitorPlus": {
+    "name": "实时硬链接+",
+    "description": "监控目录文件变化，按原文件名硬链接。增强：记录已处理文件（大小/修改时间/inode 指纹），硬链被移动后不再重复生成。",
+    "labels": "文件管理",
+    "version": "1.7.2",
+    "icon": "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/Linkace_C.png",
+    "author": "jxxghp, libremk66",
+    "level": 1,
+    "v3": true,
+    "release": true,
+    "history": {
+      "v1.7.2": "基于 MP 内置插件 LinkMonitor 1.7.1 修改：① 新增「已处理文件记录」（源文件路径 + 大小/修改时间/inode 指纹 + 目标目录），硬链被移动/入库后不再重复生成；② 目标文件已存在时自动补登记，历史文件无需手工处理；③ 记录持久化在插件数据目录（容器重建不丢）；④ 新增清空记录的命令与接口；⑤ 跳过时不再发送通知，全量同步不再刷屏"
+    }
+  }
+}

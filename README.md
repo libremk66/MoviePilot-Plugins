@@ -6,6 +6,7 @@
 |---|---|
 | [**实时硬链接+**（LinkMonitorPlus）](#实时硬链接linkmonitorplus) | 在 MoviePilot 内置「实时硬链接」基础上增加**已处理文件记录**，硬链被移动/入库后不再重复生成 |
 | [**柯南集数映射重命名**（ConanRename）](#柯南集数映射重命名conanrename) | 按银色子弹数据站(sbsub)的**权威映射**把拆分版集号改名为 TMDB 集号（自动 `-partN`、自动特辑） |
+| [**呀哈哈封面工坊**（YahahaCoverStudio）](#呀哈哈封面工坊yahahacoverstudio) | 第三方插件（作者 [呀哈哈](https://github.com/justzerock)）的**补丁版**：动态方案 1–4 也能各自设置「背景色来源」 |
 
 安装方式：MoviePilot → 设定 → 插件 → 添加插件仓库
 ```
@@ -89,8 +90,32 @@ https://github.com/libremk66/MoviePilot-Plugins
 
 ---
 
+## 呀哈哈封面工坊（YahahaCoverStudio）
+
+第三方插件「呀哈哈封面工坊」（作者 [呀哈哈](https://github.com/justzerock)，上游仓库 [justzerock/MoviePilot-Plugins](https://github.com/justzerock/MoviePilot-Plugins)）的**补丁版**，基于上游 **2.2.10**。
+
+### 打了什么补丁
+
+原本只有「静态方案」（自定义静态布局编辑器）能设**背景色来源**，动态方案只能吃全局配置。补丁后：
+
+| 位置 | 说明 |
+|---|---|
+| 封面工坊 → 方案列表 → 动态方案的齿轮 → **动态方案 N 配置** | 新增「**背景色来源**」：从主图自动取色 / 手动指定 / 配置指定 |
+| 同一面板 | 选「手动指定」时出现「**手动颜色**」拾色器 |
+| 保存 | 随该方案的动态参数一起保存（`bg_color_mode` / `custom_bg_color`），**每个动态方案可各不相同** |
+| 页面模拟预览 | 自动跟随该设置，所见即所得 |
+
+静态方案、全局背景色设置的行为**保持不变**；未设置过的动态方案沿用全局配置。
+
+### 上游更新后怎么重打
+
+见 [`docs/呀哈哈封面工坊-上游升级后如何重打.md`](docs/呀哈哈封面工坊-上游升级后如何重打.md)，补丁文件在 [`patches/`](patches/)。
+
+---
+
 ## 许可
 
 - 本仓库中的 LinkMonitorPlus 基于 MoviePilot 内置插件 LinkMonitor（作者 jxxghp）修改
+- 本仓库中的 YahahaCoverStudio 基于第三方插件「呀哈哈封面工坊」（作者 呀哈哈）修改，仅作本地补丁
 - 原项目 MoviePilot 采用 **GPL-3.0**，本仓库同样以 **GPL-3.0** 发布（见 `LICENSE`）
 - 保留原作者署名；任何人可自由使用、修改、再分发（需同样遵守 GPL-3.0）

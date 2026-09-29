@@ -1,0 +1,201 @@
+From 1806d0fac3718c60b7fcd201911f55c239b0c35b Mon Sep 17 00:00:00 2001
+From: libremk66 <269451582+libremk66@users.noreply.github.com>
+Date: Tue, 29 Sep 2026 19:53:10 +0800
+Subject: [PATCH] =?UTF-8?q?=E8=A1=A5=E4=B8=81=EF=BC=9A=E5=8A=A8=E6=80=81?=
+ =?UTF-8?q?=E6=96=B9=E6=A1=88=E6=94=AF=E6=8C=81=E6=8C=89=E6=96=B9=E6=A1=88?=
+ =?UTF-8?q?=E8=AE=BE=E7=BD=AE=E8=83=8C=E6=99=AF=E8=89=B2=E6=9D=A5=E6=BA=90?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ mcg_frontend/src/components/Page.vue     | 41 ++++++++++++++++++++++++
+ mcg_frontend/src/types/plugin.ts         |  2 ++
+ plugins.v2/yahahacoverstudio/__init__.py | 27 ++++++++++++++--
+ 3 files changed, 68 insertions(+), 2 deletions(-)
+
+diff --git a/mcg_frontend/src/components/Page.vue b/mcg_frontend/src/components/Page.vue
+index 40ce64d..c61b922 100644
+--- a/mcg_frontend/src/components/Page.vue
++++ b/mcg_frontend/src/components/Page.vue
+@@ -444,6 +444,18 @@
+                             :max="1"
+                             :step="0.05"
+                           />
++                          <BlueprintSelect
++                            v-model="animatedSettings.bgColorMode"
++                            label="背景色来源"
++                            :items="animatedBackgroundColorSourceItems"
++                          />
++                          <BlueprintField
++                            v-if="animatedSettings.bgColorMode === 'custom'"
++                            :model-value="animatedSettings.customBgColor || defaultAnimatedBgColor"
++                            type="color"
++                            label="手动颜色"
++                            @update:model-value="(val) => (animatedSettings.customBgColor = String(val || defaultAnimatedBgColor))"
++                          />
+                           <BlueprintRange
+                             v-model="animatedSettings.animationDuration"
+                             label="动画时长"
+@@ -1384,7 +1396,10 @@ const animatedSettings = reactive({
+   blurSize: 50,
+   colorRatio: 0.8,
+   titleScale: 1,
++  bgColorMode: 'auto' as 'auto' | 'custom' | 'config',
++  customBgColor: '',
+ })
++const defaultAnimatedBgColor = getThemeColor('--mcr-cover-auto-blend')
+ 
+ const controlBayStyle = computed(() =>
+   previewBayHeight.value > 0
+@@ -1399,6 +1414,16 @@ const simulationParams = reactive<SimulationParams>({
+   customColor: getThemeColor('--mcr-cover-auto-blend'),
+ })
+ 
++// 动态方案的背景色来源改动后，同步到页面模拟预览，保证预览与生成一致
++watch(
++  () => [animatedSettings.bgColorMode, animatedSettings.customBgColor] as const,
++  () => {
++    if (!animatedSettingsPanelOpen.value) return
++    simulationParams.colorSource = animatedSettings.bgColorMode
++    simulationParams.customColor = animatedSettings.customBgColor || defaultAnimatedBgColor
++  },
++)
++
+ interface HistoryItem {
+   name: string
+   size: string
+@@ -2354,6 +2379,10 @@ function syncAnimatedSettings(data?: Partial<StatusPayload> | null, baseStyle: C
+   animatedSettings.blurSize = clampNumber(source.blur_size ?? animatedSettings.blurSize, 0, 100, 50)
+   animatedSettings.colorRatio = clampFloat(source.color_ratio ?? animatedSettings.colorRatio, 0, 1, 0.8)
+   animatedSettings.titleScale = clampFloat(source.title_scale ?? animatedSettings.titleScale, 0.2, 3, 1)
++  animatedSettings.bgColorMode = ['auto', 'custom', 'config'].includes(String(source.bg_color_mode))
++    ? source.bg_color_mode as 'auto' | 'custom' | 'config'
++    : 'auto'
++  animatedSettings.customBgColor = String(source.custom_bg_color || animatedSettings.customBgColor || '')
+ }
+ 
+ function syncRenderOptions(data?: Partial<StatusPayload> | null) {
+@@ -2418,6 +2447,8 @@ async function openAnimatedSettings(item: SchemeListItem) {
+     await setCoverStyle(item.baseStyle, 'animated')
+   }
+   syncAnimatedSettings(null, item.baseStyle)
++  simulationParams.colorSource = animatedSettings.bgColorMode
++  simulationParams.customColor = animatedSettings.customBgColor || defaultAnimatedBgColor
+ }
+ 
+ async function saveAnimatedSettings() {
+@@ -2441,6 +2472,10 @@ async function saveAnimatedSettings() {
+       blur_size: animatedSettings.blurSize,
+       color_ratio: animatedSettings.colorRatio,
+       title_scale: animatedSettings.titleScale,
++      bg_color_mode: animatedSettings.bgColorMode,
++      custom_bg_color: animatedSettings.bgColorMode === 'custom'
++        ? (animatedSettings.customBgColor || defaultAnimatedBgColor)
++        : animatedSettings.customBgColor,
+     }
+     const resp = await props.api.post<{
+       code: number
+@@ -2577,6 +2612,12 @@ const animatedDepartureItems = [
+   { title: '渐变', value: 'crossfade' },
+ ]
+ 
++const animatedBackgroundColorSourceItems = [
++  { title: '从主图自动取色', value: 'auto' },
++  { title: '手动指定', value: 'custom' },
++  { title: '配置指定', value: 'config' },
++]
++
+ const animatedSettingsTitle = computed(() => {
+   const index = animatedSettingsBaseStyle.value.split('_')[1] || '1'
+   return `动态方案 ${index} 配置`
+diff --git a/mcg_frontend/src/types/plugin.ts b/mcg_frontend/src/types/plugin.ts
+index 4f0d424..91734b4 100644
+--- a/mcg_frontend/src/types/plugin.ts
++++ b/mcg_frontend/src/types/plugin.ts
+@@ -114,6 +114,8 @@ export interface AnimatedStyleSettings {
+   blur_size?: number
+   color_ratio?: number
+   title_scale?: number
++  bg_color_mode?: 'auto' | 'custom' | 'config'
++  custom_bg_color?: string
+ }
+ 
+ export interface TemplateTransform {
+diff --git a/plugins.v2/yahahacoverstudio/__init__.py b/plugins.v2/yahahacoverstudio/__init__.py
+index 6990688..7705598 100644
+--- a/plugins.v2/yahahacoverstudio/__init__.py
++++ b/plugins.v2/yahahacoverstudio/__init__.py
+@@ -221,6 +221,8 @@ class YahahaCoverStudio(_PluginBase):
+     _animated_2_image_count = 6
+     _animated_2_departure_type = 'fly'
+     _animated_settings: Dict[str, Dict[str, Any]] = {}
++    _bg_color_mode = 'auto'
++    _custom_bg_color = ''
+     _style_naming_v2 = True
+     _sanitize_log_cache = set()
+     _clean_images = False
+@@ -670,6 +672,9 @@ class YahahaCoverStudio(_PluginBase):
+                 "title_scale[default]",
+                 float,
+             ),
++            # 背景色来源：动态方案可单独设置，默认沿用全局配置
++            "bg_color_mode": self._bg_color_mode if self._bg_color_mode in ["auto", "custom", "config"] else "auto",
++            "custom_bg_color": self._custom_bg_color or "",
+         }
+ 
+     def __normalize_animated_setting(
+@@ -759,6 +764,10 @@ class YahahaCoverStudio(_PluginBase):
+                 "title_scale[style]",
+                 float,
+             ),
++            "bg_color_mode": str(raw.get("bg_color_mode", base.get("bg_color_mode", "auto")) or "auto").strip().lower()
++            if str(raw.get("bg_color_mode", base.get("bg_color_mode", "auto")) or "auto").strip().lower() in ["auto", "custom", "config"]
++            else "auto",
++            "custom_bg_color": str(raw.get("custom_bg_color", base.get("custom_bg_color", "")) or "").strip(),
+         }
+ 
+     def __normalize_animated_settings_map(self, settings: Optional[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+@@ -4463,6 +4472,8 @@ class YahahaCoverStudio(_PluginBase):
+                     "blur_size": active_animated_settings["blur_size"],
+                     "color_ratio": active_animated_settings["color_ratio"],
+                     "title_scale": active_animated_settings["title_scale"],
++                    "bg_color_mode": active_animated_settings["bg_color_mode"],
++                    "custom_bg_color": active_animated_settings["custom_bg_color"],
+                     "animated_settings": animated_settings,
+                     **preview_custom_static,
+                 },
+@@ -6000,6 +6011,8 @@ class YahahaCoverStudio(_PluginBase):
+                     "blur_size": active_settings["blur_size"],
+                     "color_ratio": active_settings["color_ratio"],
+                     "title_scale": active_settings["title_scale"],
++                    "bg_color_mode": active_settings["bg_color_mode"],
++                    "custom_bg_color": active_settings["custom_bg_color"],
+                     "animated_settings": animated_settings,
+                 },
+             }
+@@ -8745,9 +8758,19 @@ class YahahaCoverStudio(_PluginBase):
+         logger.info(f"当前分辨率配置: {self._resolution_config}")
+ 
+         # 准备背景颜色配置
++        # 动态方案支持按方案单独设置背景色来源（未设置时已在归一化阶段继承全局配置）
++        bg_color_mode = self._bg_color_mode
++        custom_bg_color = self._custom_bg_color
++        if self._cover_style.startswith("animated") and animated_runtime_settings:
++            style_mode = str(animated_runtime_settings.get("bg_color_mode") or "").strip().lower()
++            if style_mode in ["auto", "custom", "config"]:
++                bg_color_mode = style_mode
++            style_custom_color = str(animated_runtime_settings.get("custom_bg_color") or "").strip()
++            if style_custom_color:
++                custom_bg_color = style_custom_color
+         bg_color_config = {
+-            'mode': self._bg_color_mode,
+-            'custom_color': self._custom_bg_color,
++            'mode': bg_color_mode,
++            'custom_color': custom_bg_color,
+             'config_color': config_bg_color
+         }
+         preset_image_input = image_paths if len(image_paths) > 1 else primary_image_path
+-- 
+2.43.0
+

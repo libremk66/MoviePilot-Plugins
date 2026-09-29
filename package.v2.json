@@ -28,5 +28,20 @@
       "v1.0.0": "首版：sbsub 映射 + 递归扫描 + 多段/特辑处理 + 预演模式 + 不覆盖保护"
     },
     "v3": false
+  },
+  "YahahaCoverStudio": {
+    "name": "呀哈哈封面工坊",
+    "description": "全新vue前端,支持可编辑静态封面、动态方案、历史封面、Webhook 入库监控。【libremk66 版补丁】动态方案 1-4 可各自设置「背景色来源」（从主图自动取色/手动指定/配置指定）+ 手动颜色，与静态方案一致。",
+    "labels": "海报,可编辑画布,封面,Emby,Jellyfin,动态",
+    "version": "2.2.10.1",
+    "icon": "https://raw.githubusercontent.com/justzerock/MoviePilot-Plugins/main/icons/yahaha-cover-studio.png",
+    "author": "呀哈哈, libremk66",
+    "level": 1,
+    "system_version": ">=3.0.0",
+    "v3": false,
+    "release": false,
+    "history": {
+      "v2.2.10.1": "基于上游 2.2.10 打补丁：动态方案 1-4 各自支持设置「背景色来源」（从主图自动取色/手动指定/配置指定）与手动颜色，设置随该方案的动态参数一起保存；页面模拟预览同步该设置。上游原作者：呀哈哈（justzerock/MoviePilot-Plugins）。"
+    }
   }
 }

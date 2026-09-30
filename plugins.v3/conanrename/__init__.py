@@ -68,7 +68,7 @@ class ConanRename(_PluginBase):
     # 插件图标
     plugin_icon = "Linkace_C.png"
     # 插件版本
-    plugin_version = "1.1.0"
+    plugin_version = "1.1.1"
     # 插件作者
     plugin_author = "libremk66"
     # 作者主页
@@ -99,8 +99,11 @@ class ConanRename(_PluginBase):
     _sync_cron: Optional[str] = None
     _sync_sub_ids: List[int] = []
     _sync_mode: str = "range"
-    _sync_front: str = r"Conan\.S01E"
-    _sync_back: str = r"\.1996"
+    # 定位词要同时容忍「点」和「空格」两种分隔：本地文件名用点（Conan.S01E1215.1996），
+    # 站点种子名用空格（Conan S01E1215 1996）。只认点会让规则在订阅搜索时静默失效——
+    # words.py 里前定位词匹配不上就直接返回，整条偏移规则作废。
+    _sync_front: str = r"Conan[\s.]S01E"
+    _sync_back: str = r"[\s.]1996"
     _sync_keep_others: bool = True
     # 上次运行结果（供页面展示）
     _last_result: Dict[str, Any] = {}
@@ -133,8 +136,8 @@ class ConanRename(_PluginBase):
             self._sync_cron = config.get("sync_cron")
             self._sync_sub_ids = self._normalize_sub_ids(config.get("sync_sub_ids"))
             self._sync_mode = config.get("sync_mode") or "range"
-            self._sync_front = str(config.get("sync_front") or "").strip() or r"Conan\.S01E"
-            self._sync_back = str(config.get("sync_back") or "").strip() or r"\.1996"
+            self._sync_front = str(config.get("sync_front") or "").strip() or r"Conan[\s.]S01E"
+            self._sync_back = str(config.get("sync_back") or "").strip() or r"[\s.]1996"
             self._sync_keep_others = bool(config.get("sync_keep_others", True))
 
         pending_jobs: List[Dict[str, Any]] = []
@@ -327,11 +330,11 @@ class ConanRename(_PluginBase):
                     {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
                         {"component": "VTextField", "props": {
                             "model": "sync_front", "label": "前定位词（正则）",
-                            "placeholder": "Conan\\.S01E"}}]},
+                            "placeholder": "Conan[\\s.]S01E"}}]},
                     {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
                         {"component": "VTextField", "props": {
                             "model": "sync_back", "label": "后定位词（正则）",
-                            "placeholder": "\\.1996"}}]},
+                            "placeholder": "[\\s.]1996"}}]},
                 ]},
             ]}
         ], {
@@ -647,8 +650,8 @@ class ConanRename(_PluginBase):
         """按区间生成识别词规则。"""
         if not ranges:
             return []
-        front = self._sync_front or r"Conan\.S01E"
-        back = self._sync_back or r"\.1996"
+        front = self._sync_front or r"Conan[\s.]S01E"
+        back = self._sync_back or r"[\s.]1996"
         if (mode or "range") == "tail":
             tail = ranges[-1]
             return [f"{front} <> {back} >> EP{tail['offset']:+d}"]
@@ -665,7 +668,7 @@ class ConanRename(_PluginBase):
     def _compose_words(self, existing: str, rules: List[str]) -> str:
         """把规则写进插件维护的注释区块，保留订阅里其它识别词（含手工写的旧版同步规则）。"""
         block = [SYNC_MARK_BEGIN, *rules, SYNC_MARK_END]
-        front = self._sync_front or r"Conan\.S01E"
+        front = self._sync_front or r"Conan[\s.]S01E"
         kept: List[str] = []
         inside = False
         for line in (existing or "").splitlines():

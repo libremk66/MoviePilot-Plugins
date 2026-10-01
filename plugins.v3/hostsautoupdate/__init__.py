@@ -72,7 +72,7 @@ class HostsAutoUpdate(_PluginBase):
     # 插件图标
     plugin_icon = "Linkace_C.png"
     # 插件版本
-    plugin_version = "1.0.2"
+    plugin_version = "1.0.3"
     # 插件作者
     plugin_author = "libremk66"
     # 作者主页
@@ -391,10 +391,12 @@ class HostsAutoUpdate(_PluginBase):
                 # 查询失败 → 保留上次的值，避免把已有记录清掉
                 mapping[dom] = previous[dom]
                 result["failed"].append(f"{dom}(保留旧值)")
-                logger.warning(f"Hosts 自动更新：{dom} 查询失败，保留上次的 {previous[dom]}")
+                # 带上 detail：这行是判断"是污染还是超时"的唯一线索，别省
+                logger.warning(
+                    f"Hosts 自动更新：{dom} 查询失败，保留上次的 {previous[dom]} ｜原因：{detail}")
             else:
-                result["failed"].append(dom)
-                logger.warning(f"Hosts 自动更新：{dom} 查询失败且无旧值，跳过")
+                result["failed"].append(f"{dom}(无旧值)")
+                logger.warning(f"Hosts 自动更新：{dom} 查询失败且无旧值，跳过 ｜原因：{detail}")
 
         if not mapping:
             logger.error("Hosts 自动更新：所有域名都没解析出来，不写文件")
@@ -402,11 +404,12 @@ class HostsAutoUpdate(_PluginBase):
             return result
 
         # 组装新内容
+        # ⚠️ 区块里**不能放时间戳**：它每次运行都不同，会让下面的 final == lines
+        #    永远为假 → 每轮都重写文件、每轮都发通知。要看上次运行时间请查插件日志/页面。
         block = [MARK_BEGIN]
         for dom in domains:
             if dom in mapping:
                 block.append(f"{mapping[dom]} {dom}")
-        block.append(f"# 最后更新：{datetime.now():%Y-%m-%d %H:%M:%S}")
         block.append(MARK_END)
 
         kept = self._strip_block(lines)
@@ -420,13 +423,14 @@ class HostsAutoUpdate(_PluginBase):
         #    放开头则插件永远优先，两者并存也不会冲突。
         final = block + [""] + kept
 
-        old_block = [ln for ln in lines if ln.split()[-1:] and ln.split()[-1] in domains]
-        new_block = [ln for ln in block if ln.split() and ln.split()[-1] in domains]
-        if sorted(x.strip() for x in old_block) == sorted(x.strip() for x in new_block):
-            logger.info(f"Hosts 自动更新：{len(mapping)} 个域名解析结果无变化，跳过写入")
+        # ⚠️ 判断「有没有变化」必须比**整个文件**（final == lines），不能只挑出域名行来比。
+        #    文件里可能还有别的、格式不同的同域名条目 —— 比如手动加的一行塞三个域名
+        #    「104.26.8.23 lain.bgm.tv api.bgm.tv bgm.tv」，它的最后一个 token 是 bgm.tv，
+        #    会被「域名匹配」捡到，导致每次都被误判成"有变化"、反复重写 + 反复通知。
+        if final == lines:
+            logger.info(f"Hosts 自动更新：{len(mapping)} 个域名解析结果无变化（含失败项），跳过写入")
             result["changed"] = False
-            if self._notify:
-                self.__notify("Hosts 自动更新：无变化", f"{len(mapping)} 个域名解析结果未变，未写入")
+            # 无变化一律不通知 —— 只在真正写入时才打扰用户
             return result
 
         if self._write_hosts(final):

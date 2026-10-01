@@ -72,7 +72,7 @@ class HostsAutoUpdate(_PluginBase):
     # 插件图标
     plugin_icon = "Linkace_C.png"
     # 插件版本
-    plugin_version = "1.0.1"
+    plugin_version = "1.0.2"
     # 插件作者
     plugin_author = "libremk66"
     # 作者主页
@@ -188,6 +188,11 @@ class HostsAutoUpdate(_PluginBase):
             if not re.match(r"^https?://", u, re.I):
                 u = "https://" + u
             u = u.rstrip("/")
+            # 只填了域名、没有路径时提醒 —— 多数 DoH 端点是 /dns-query，
+            # 光访问根路径拿不到 DNS 结果（dns.google 则是 /resolve）
+            if u.count("/") <= 2:
+                logger.warning(f"Hosts 自动更新：DoH 地址 {u} 只有主机名没有路径，"
+                               f"多数端点应为 /dns-query，请检查配置")
             if u not in out:
                 out.append(u)
         return out
@@ -217,14 +222,26 @@ class HostsAutoUpdate(_PluginBase):
         return True
 
     def _get_proxies(self) -> Optional[dict]:
-        """按 MP 的约定取系统代理；未启用或未配置则返回 None（直连）。"""
+        """
+        按 MP 的约定取系统代理；未启用或未配置则返回 None（直连）。
+
+        ⚠️ `settings.PROXY` 在 MP 里**本来就是 requests 格式的字典**
+        （形如 `{'http': 'http://ip:port', 'https': '...'}`），不是字符串。
+        早期版本把它当成字符串再包一层 `{"http": proxy, "https": proxy}`，
+        结果变成「字典套字典」—— requests 解析代理 URL 时抛
+        `expected string or bytes-like object, got 'dict'`，所有查询全挂。
+        """
         if not self._use_proxy:
             return None
         try:
             proxy = getattr(settings, "PROXY", None)
-            if proxy:
-                return {"http": proxy, "https": proxy}
-            logger.warning("Hosts 自动更新：勾了「使用代理」但系统代理未配置，本次直连")
+            if not proxy:
+                logger.warning("Hosts 自动更新：勾了「使用代理」但系统代理未配置，本次直连")
+                return None
+            # 已经是 requests 要的格式就直接用；是字符串才包一层
+            if isinstance(proxy, dict):
+                return proxy
+            return {"http": str(proxy), "https": str(proxy)}
         except Exception as e:
             logger.error(f"Hosts 自动更新：读取系统代理失败：{str(e)}")
         return None

@@ -16,6 +16,8 @@ Hosts 自动更新（HostsAutoUpdate）
 
 安全约定：
     · 只写插件自己的注释区块（`# >>> HostsAutoUpdate …` / `# <<<`），文件其它内容一律不动
+    · 区块写在**文件开头** —— glibc「第一条匹配即返回」，放末尾会被 Docker 的
+      extra_hosts 抢先，更新就白做了
     · 每次写入前备份到插件数据目录（hosts.bak.YYYYMMDD-HHMMSS）
     · DoH 查询失败的域名**保留上一次的值**，不会被清掉
     · 没有变化时不写文件（减少无谓写入）
@@ -70,7 +72,7 @@ class HostsAutoUpdate(_PluginBase):
     # 插件图标
     plugin_icon = "Linkace_C.png"
     # 插件版本
-    plugin_version = "1.0.0"
+    plugin_version = "1.0.1"
     # 插件作者
     plugin_author = "libremk66"
     # 作者主页
@@ -101,13 +103,25 @@ class HostsAutoUpdate(_PluginBase):
            所以这里**固定**安排一次启动后执行，把区块重新写回去（这是本插件的核心价值之一）。
         """
         self.stop_service()
+
+        # ⚠️ 默认值**必须先落一遍**，不能只在 `if config:` 里赋。
+        #    首次安装时 MP 会用空配置调用 init_plugin，若默认值写在 if 里面就全部落空 ——
+        #    _doh_servers 为空 → 一个 DoH 都没有；_cron 为 None → 定时任务不注册。
+        self._enabled = False
+        self._notify = False
+        self._onlyonce = False
+        self._cron = DEFAULT_CRON
+        self._domains = DEFAULT_DOMAINS
+        self._doh_servers = self._parse_url_list(DEFAULT_DOH)
+        self._use_proxy = True
+
         if config:
             self._enabled = bool(config.get("enabled"))
             self._notify = bool(config.get("notify"))
             self._onlyonce = bool(config.get("onlyonce"))
             self._cron = config.get("cron") or DEFAULT_CRON
             self._domains = str(config.get("domains") or "").strip() or DEFAULT_DOMAINS
-            self._doh_servers = self._parse_domain_list(
+            self._doh_servers = self._parse_url_list(
                 str(config.get("doh_server") or "").strip() or DEFAULT_DOH)
             self._use_proxy = bool(config.get("use_proxy", True))
 
@@ -157,6 +171,26 @@ class HostsAutoUpdate(_PluginBase):
         }]
 
     # ─── 核心逻辑 ───
+
+    @staticmethod
+    def _parse_url_list(raw: str) -> List[str]:
+        """
+        解析 **DoH 地址**清单：一行一个，保留完整 URL。
+
+        ⚠️ 不能复用 _parse_domain_list —— 那个会把 `https://` 和路径都剥掉，
+        结果 `https://doh.pub/dns-query` 会变成 `doh.pub`，请求直接打不出去。
+        """
+        out: List[str] = []
+        for line in (raw or "").splitlines():
+            u = line.strip()
+            if not u or u.startswith("#"):
+                continue
+            if not re.match(r"^https?://", u, re.I):
+                u = "https://" + u
+            u = u.rstrip("/")
+            if u not in out:
+                out.append(u)
+        return out
 
     @staticmethod
     def _parse_domain_list(raw: str) -> List[str]:
@@ -359,10 +393,15 @@ class HostsAutoUpdate(_PluginBase):
         block.append(MARK_END)
 
         kept = self._strip_block(lines)
-        # 去掉尾部的空行，保持整洁
-        while kept and not kept[-1].strip():
-            kept.pop()
-        final = kept + [""] + block
+        # 去掉开头空行，保持整洁
+        while kept and not kept[0].strip():
+            kept.pop(0)
+        # ⚠️ 区块放在**文件开头**，不是末尾。
+        #    glibc 解析 /etc/hosts 是「第一条匹配就返回」，而 docker-compose 的
+        #    extra_hosts 会被 Docker 写在文件前部。若本插件把区块追加到末尾，
+        #    那条**静态的旧 IP** 会一直胜出 —— 插件的更新等于白做。
+        #    放开头则插件永远优先，两者并存也不会冲突。
+        final = block + [""] + kept
 
         old_block = [ln for ln in lines if ln.split()[-1:] and ln.split()[-1] in domains]
         new_block = [ln for ln in block if ln.split() and ln.split()[-1] in domains]

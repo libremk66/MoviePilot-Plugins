@@ -44,5 +44,19 @@
       "v2.2.10.2": "新增「背景类型」：模糊主图 / 纯色 —— 纯色=用所选颜色原样铺满背景（不压暗、不加噪点、无渐变，方案 3 也生效）；修复重载/停止插件后动图预览被遗留停止标志挡住的问题。",
       "v2.2.10.1": "基于上游 2.2.10 打补丁：动态方案 1-4 各自支持设置「背景色来源」（从主图自动取色/手动指定/配置指定）与手动颜色，设置随该方案的动态参数一起保存；页面模拟预览同步该设置。上游原作者：呀哈哈（justzerock/MoviePilot-Plugins）。"
     }
+  },
+  "HostsAutoUpdate": {
+    "name": "Hosts 自动更新",
+    "description": "定期用 DoH（加密 DNS）查询指定域名的真实 IP，写入容器 /etc/hosts，绕开明文 DNS 污染导致的解析失败（如 *.bgm.tv）。自动跟随 IP 变化，容器重建后自动重写；只维护自己的注释区块，文件其它内容一律不动，每次写入前自动备份。",
+    "labels": "工具",
+    "version": "1.0.0",
+    "icon": "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/Linkace_C.png",
+    "author": "libremk66",
+    "level": 1,
+    "system_version": ">=3.0.0",
+    "release": false,
+    "history": {
+      "v1.0.0": "首版：用 DoH 查询域名真实 IP 并写入容器 /etc/hosts 的插件区块，用于绕开明文 DNS 污染。支持自定义域名清单与 DoH 服务器、cron 定时、手动执行、通知；查询失败的域名保留上一次的值；启动时自动补写（应对容器重建后 hosts 被 Docker 重置）。"
+    }
   }
 }

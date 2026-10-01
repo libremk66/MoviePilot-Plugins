@@ -7,6 +7,7 @@
 | [**实时硬链接+**（LinkMonitorPlus）](#实时硬链接linkmonitorplus) | 在 MoviePilot 内置「实时硬链接」基础上增加**已处理文件记录**，硬链被移动/入库后不再重复生成 |
 | [**柯南集数映射重命名**（ConanRename）](#柯南集数映射重命名conanrename) | 按银色子弹数据站(sbsub)的**权威映射**把拆分版集号改名为 TMDB 集号（自动 `-partN`、自动特辑） |
 | [**呀哈哈封面工坊**（YahahaCoverStudio）](#呀哈哈封面工坊yahahacoverstudio) | 第三方插件（作者 [呀哈哈](https://github.com/justzerock)）的**补丁版**：动态方案 1–4 也能各自设置「背景色来源」和「背景类型（纯色 / 纯色渐变）」 |
+| [**Hosts 自动更新**（HostsAutoUpdate）](#hosts-自动更新hostsautoupdate) | 用 DoH 查域名真实 IP 写入容器 `/etc/hosts`，绕开**明文 DNS 污染**（如 `*.bgm.tv` 解析失败）；自动跟随 IP 变化、容器重建后自动重写 |
 
 安装方式：MoviePilot → 设定 → 插件 → 添加插件仓库
 ```
@@ -189,6 +190,87 @@ Conan[\s.]S01E(?=0*(?:12(?:6(?:3|[4-9])|7(?:[0-3]|4)))(?:\D|$)) <> [\s.]1996 >> 
 ### 上游更新后怎么重打
 
 见 [`docs/呀哈哈封面工坊-上游升级后如何重打.md`](docs/呀哈哈封面工坊-上游升级后如何重打.md)，补丁文件在 [`patches/`](patches/)。
+
+## Hosts 自动更新（HostsAutoUpdate）
+
+### 为什么需要它
+
+**明文 DNS 只会在两种结果里二选一：超时，或者返回一个假 IP。**
+
+排查实例（2026-10-01）：MoviePilot 探索页 Bangumi 封面全裂。查下来不是白名单问题、不是代理问题：
+
+| DNS 服务器 | `lain.bgm.tv` 解析结果 |
+|---|---|
+| 家用路由器（明文） | ❌ SERVFAIL |
+| 公共明文 DNS | ⚠️ 返回假 IP |
+| **加密 DNS（DoH / DoT）** | ✅ 真实的 Cloudflare IP |
+
+而 **MP 跑在容器里，它的 DNS 走宿主机 → 路由器，压根不经过 Clash** —— 所以改 Clash 配置、加图片代理都无效。
+
+`/etc/hosts` 的作用是**绕过 DNS 直接给 IP**（与 `docker-compose` 的 `extra_hosts` 同理）。
+本插件把这件事自动化：**查 → 比对 → 写 → 通知**。
+
+### 功能
+
+- 定期用 **DoH（加密 DNS）** 查询域名清单里每个域名的真实 IP
+- 写入**容器内** `/etc/hosts` 的插件专属区块（`# >>> HostsAutoUpdate …` / `# <<<` 标记）
+- **IP 变了才写**；无变化不碰文件
+- **容器重建后自动重写** —— Docker 会重置 `/etc/hosts`，插件在 MP 启动时会补写
+- 查询失败的域名**保留上一次的值**，不会被清空
+- 每次写入前**自动备份**到插件数据目录（`hosts.bak.YYYYMMDD-HHMMSS`）
+- 支持定时 / 手动执行 / 命令 / 通知
+
+### 多 DoH 交叉验证（本插件的核心设计）
+
+**单个 DoH 服务器返回的结果，本身无法判断对错。**
+
+实测证据：`doh.pub` 对 `api.bgm.tv` **偶尔**返回假 IP（抓到过一次 `179.60.193.16`），
+随后连查 10 次又全部正确 —— **污染是间歇性的**，单次查询可能恰好撞上。
+
+所以插件支持填**多个** DoH 服务器，并取各来源 IP 的**交集**：
+
+| 情况 | 处理 |
+|------|------|
+| 多个来源结果**一致**（交集非空）| ✅ 采用 —— 多个独立来源吻合，基本可排除污染 |
+| 结果**不一致**（交集为空）| ⚠️ **跳过该域名并告警** —— 疑似污染，宁可不写也不写错 |
+| 只有**一个**来源成功 | 采用，但日志/通知标注「未交叉验证」 |
+| 全部失败 | 保留上一次的值，不清空 |
+
+> ⚠️ 比对用的是 **IP 集合**而不是「第一个 IP」—— 不同 DoH 返回的 IP **顺序本来就不同**
+> （Cloudflare 和 Google 给的三个 IP 顺序就不一样），只比首个会误判成"不一致"。
+
+### 推荐配置
+
+```
+启用插件:      开
+域名清单:      lain.bgm.tv
+               api.bgm.tv
+               bgm.tv
+DoH 服务器:    https://doh.pub/dns-query            ← 国内直连可达
+               https://cloudflare-dns.com/dns-query  ← 最权威（需走代理）
+DoH 走代理:    开
+定时更新:      0 */6 * * *       （每 6 小时）
+发送通知:      按需
+```
+
+**关于代理**：`dns.google` / `cloudflare-dns.com` 在国内**直连不通**，需要勾「DoH 请求走系统代理」
+（用的是 MoviePilot 的系统代理设置 `settings.PROXY`）。
+`doh.pub` 直连可达，所以上面这个组合即使没配代理也至少有一个来源能用。
+
+### 排查与触发
+
+| 方式 | 说明 |
+|---|---|
+| 插件页面 | 直接显示当前 `/etc/hosts` 里这些域名的生效记录 |
+| `/hosts_update` 命令 | 在 MP 里发命令立即更新一次 |
+| `GET /api/v1/plugin/HostsAutoUpdate/hosts_update?apikey=<token>` | 接口触发 |
+| `GET /api/v1/plugin/HostsAutoUpdate/hosts_status?apikey=<token>` | 查看当前记录 |
+
+### 注意
+
+- 写的是**容器内**的 hosts，**只影响 MoviePilot 自己**，不动宿主机、不动其它容器
+- 域名清单填任意被 DNS 污染的域名即可，不限于 Bangumi
+- 容器内 `/etc/hosts` 是 Docker 的 bind mount，**不能原子替换**（会 EBUSY），插件用的是就地覆盖写
 
 ## 许可
 

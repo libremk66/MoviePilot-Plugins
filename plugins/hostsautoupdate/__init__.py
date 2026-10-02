@@ -24,6 +24,7 @@ Hosts 自动更新（HostsAutoUpdate）
     · /etc/hosts 在容器内是 Docker bind mount，**不能 os.replace**（会 EBUSY），
       必须就地覆盖写 —— 见 _write_hosts()
 """
+import json
 import re
 from datetime import datetime
 from pathlib import Path
@@ -72,7 +73,7 @@ class HostsAutoUpdate(_PluginBase):
     # 插件图标
     plugin_icon = "Linkace_C.png"
     # 插件版本
-    plugin_version = "1.0.3"
+    plugin_version = "1.0.4"
     # 插件作者
     plugin_author = "libremk66"
     # 作者主页
@@ -300,6 +301,13 @@ class HostsAutoUpdate(_PluginBase):
         common = set.intersection(*[ips for _, ips in per_source])
         detail = "｜".join(f"{n}={'/'.join(sorted(i))}" for n, i in per_source)
         if not common:
+            # 来源不一致（实测基本是 doh.pub 侧偶发返回异常）。
+            # 优先采纳 Cloudflare 侧：它经代理加密查询、结果最权威；
+            # 若连它也查不到，再交给上层用旧值/缓存兜底。
+            for name, ips in per_source:
+                if "cloudflare" in name.lower() and ips:
+                    picked = sorted(ips)[0]
+                    return picked, f"⚠️ 来源不一致，采纳 Cloudflare 单源 {picked} → {detail}"
             return None, f"⚠️ 各来源不一致，疑似污染 → {detail}"
         return sorted(common)[0], detail
 
@@ -310,6 +318,31 @@ class HostsAutoUpdate(_PluginBase):
         except Exception as e:
             logger.error(f"Hosts 自动更新：读取 {HOSTS_PATH} 失败：{str(e)}")
             return None
+
+    def _cache_path(self) -> Path:
+        """last-good 缓存文件（存插件数据目录，容器重建后依然在）。"""
+        return Path(self.get_data_path()) / "last_good.json"
+
+    def _load_cache(self) -> Dict[str, str]:
+        """读上次成功写入的 IP 映射；容器重建后 /etc/hosts 被清空，靠它兜底补全。"""
+        try:
+            p = self._cache_path()
+            if p.is_file():
+                data = json.loads(p.read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    return {k: v for k, v in data.items()
+                            if isinstance(v, str) and self._is_valid_ipv4(v)}
+        except Exception as e:
+            logger.warning(f"Hosts 自动更新：读取 last-good 缓存失败（忽略）：{str(e)}")
+        return {}
+
+    def _save_cache(self, mapping: Dict[str, str]) -> None:
+        try:
+            p = self._cache_path()
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(json.dumps(mapping, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception as e:
+            logger.warning(f"Hosts 自动更新：保存 last-good 缓存失败（忽略）：{str(e)}")
 
     @staticmethod
     def _strip_block(lines: List[str]) -> List[str]:
@@ -378,14 +411,20 @@ class HostsAutoUpdate(_PluginBase):
             if len(parts) == 2 and self._is_valid_ipv4(parts[0]) and parts[1] in domains:
                 previous.setdefault(parts[1], parts[0])
 
+        # 持久化缓存兜底：容器重建后 previous 为空，用 last-good 缓存补全
+        last_good = self._load_cache()
+
         # 逐个查询
         mapping: Dict[str, str] = {}
+        warned: List[str] = []
         for dom in domains:
             result["checked"] += 1
             ip, detail = self._resolve(dom)
             if ip:
                 mapping[dom] = ip
                 result["resolved"] += 1
+                if "⚠️" in detail:
+                    warned.append(f"{dom}(单源)")
                 logger.info(f"Hosts 自动更新：{dom} → {ip}（{detail}）")
             elif dom in previous:
                 # 查询失败 → 保留上次的值，避免把已有记录清掉
@@ -394,6 +433,12 @@ class HostsAutoUpdate(_PluginBase):
                 # 带上 detail：这行是判断"是污染还是超时"的唯一线索，别省
                 logger.warning(
                     f"Hosts 自动更新：{dom} 查询失败，保留上次的 {previous[dom]} ｜原因：{detail}")
+            elif dom in last_good:
+                # 容器重建后 /etc/hosts 里没有旧值 → 用持久化缓存兜底，避免"写不满"
+                mapping[dom] = last_good[dom]
+                result["failed"].append(f"{dom}(用缓存值)")
+                logger.warning(
+                    f"Hosts 自动更新：{dom} 查询失败，使用 last-good 缓存值 {last_good[dom]} ｜原因：{detail}")
             else:
                 result["failed"].append(f"{dom}(无旧值)")
                 logger.warning(f"Hosts 自动更新：{dom} 查询失败且无旧值，跳过 ｜原因：{detail}")
@@ -402,6 +447,9 @@ class HostsAutoUpdate(_PluginBase):
             logger.error("Hosts 自动更新：所有域名都没解析出来，不写文件")
             result["error"] = "全部解析失败"
             return result
+
+        # 更新持久化缓存（含本轮成功解析与回退的值），容器重建后靠它兜底
+        self._save_cache(mapping)
 
         # 组装新内容
         # ⚠️ 区块里**不能放时间戳**：它每次运行都不同，会让下面的 final == lines
@@ -445,6 +493,8 @@ class HostsAutoUpdate(_PluginBase):
             title = f"Hosts 自动更新：{'已更新 ' + str(len(mapping)) + ' 条' if result['written'] else '无变化'}"
             if result["failed"]:
                 lines_msg.append(f"\n⚠️ 查询失败：{', '.join(result['failed'])}")
+            if warned:
+                lines_msg.append(f"\nℹ️ 单源采纳（对侧疑似污染）：{', '.join(warned)}")
             self.__notify(title, "\n".join(lines_msg))
         return result
 
@@ -512,8 +562,8 @@ class HostsAutoUpdate(_PluginBase):
                         {"component": "VAlert", "props": {
                             "type": "info", "variant": "tonal", "class": "mb-2",
                             "text": "原理：DoH 查真实 IP → 写入容器 /etc/hosts 的插件区块，用于绕开明文 DNS 污染。"
-                                    "填多个 DoH 时取各来源 IP 的交集：交集为空 = 来源不一致 = 疑似污染，会跳过并告警。"
-                                    "每次写入前自动备份；查询失败的域名保留上一次的值；容器重建后自动重写。"}}]},
+                                    "填多个 DoH 时取各来源 IP 的交集；交集为空时采纳 Cloudflare 侧结果（通知里标注「单源采纳」）。"
+                                    "每次写入前自动备份；查询失败时按 hosts 旧值 → 本地 last-good 缓存兜底；容器重建后自动重写。"}}]},
                 ]},
             ]},
         ], {

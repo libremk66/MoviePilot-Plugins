@@ -63,20 +63,6 @@
       "v1.0.0": "首版：用 DoH 查询域名真实 IP 并写入容器 /etc/hosts 的插件区块，用于绕开明文 DNS 污染。支持自定义域名清单与 DoH 服务器、cron 定时、手动执行、通知；查询失败的域名保留上一次的值；启动时自动补写（应对容器重建后 hosts 被 Docker 重置）。"
     }
   },
-  "MaoyanRank": {
-    "name": "猫眼榜单订阅（仅通知模式）",
-    "description": "监控猫眼榜单自动添加订阅。本地增强 v4.1.4.1：新增「仅通知模式」——订阅只检测不自动下载，检测到资源后发通知；关闭开关即恢复原生自动下载。",
-    "labels": "媒体订阅",
-    "version": "4.1.4.1",
-    "icon": "https://raw.githubusercontent.com/baozaodetudou/MoviePilot-Plugins/main/icons/maoyan.jpg",
-    "author": "逗猫, libremk66",
-    "level": 1,
-    "system_version": ">=3.0.0",
-    "release": false,
-    "history": {
-      "v4.1.4.1": "本地增强：①新增「仅通知模式」开关（默认开）——猫眼订阅全部置为暂停，MP 不再自动搜索下载；②新增资源检测任务（默认每 6 小时，可配）：用 MP 搜索链检测，命中即发通知（含资源名/站点/大小/做种/链接），同一订阅 3 天内只通知一次；③关闭开关自动把订阅恢复为「订阅中」"
-    }
-  },
   "AutomaticSubscriptionAssistant": {
     "name": "自动订阅助手（仅通知增强）",
     "description": "聚合豆瓣/猫眼/Netflix/热门/蜜柑等榜单，过滤后自动订阅。本地增强 v3.1.0.1：新增「仅通知模式」——订阅只检测不自动下载，检测到资源后通知；前端已加对应开关。",

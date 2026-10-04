@@ -62,5 +62,19 @@
       "v1.0.1": "修复两处会让插件完全不工作的 bug：① 首次安装时 MP 以空配置调用 init_plugin，而默认值只在 `if config:` 内赋值 → DoH 列表为空、定时任务也不注册；现改为默认值先落一遍。② DoH 地址误用了域名解析函数，`https://` 和 `/dns-query` 被剥掉 → 请求根本打不出去；改用独立的 URL 解析。另：写入的区块从 hosts **末尾移到文件开头** —— glibc 解析 hosts 是「第一条匹配即返回」，放末尾会被 docker-compose 的 extra_hosts 抢先，插件的更新等于白做。",
       "v1.0.0": "首版：用 DoH 查询域名真实 IP 并写入容器 /etc/hosts 的插件区块，用于绕开明文 DNS 污染。支持自定义域名清单与 DoH 服务器、cron 定时、手动执行、通知；查询失败的域名保留上一次的值；启动时自动补写（应对容器重建后 hosts 被 Docker 重置）。"
     }
+  },
+  "MaoyanRank": {
+    "name": "猫眼榜单订阅（仅通知模式）",
+    "description": "监控猫眼榜单自动添加订阅。本地增强 v4.1.4.1：新增「仅通知模式」——订阅只检测不自动下载，检测到资源后发通知；关闭开关即恢复原生自动下载。",
+    "labels": "媒体订阅",
+    "version": "4.1.4.1",
+    "icon": "https://raw.githubusercontent.com/baozaodetudou/MoviePilot-Plugins/main/icons/maoyan.jpg",
+    "author": "逗猫, libremk66",
+    "level": 1,
+    "system_version": ">=3.0.0",
+    "release": false,
+    "history": {
+      "v4.1.4.1": "本地增强：①新增「仅通知模式」开关（默认开）——猫眼订阅全部置为暂停，MP 不再自动搜索下载；②新增资源检测任务（默认每 6 小时，可配）：用 MP 搜索链检测，命中即发通知（含资源名/站点/大小/做种/链接），同一订阅 3 天内只通知一次；③关闭开关自动把订阅恢复为「订阅中」"
+    }
   }
 }

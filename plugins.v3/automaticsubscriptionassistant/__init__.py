@@ -56,7 +56,7 @@ class AutomaticSubscriptionAssistant(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/Aqr-K/MoviePilot-Plugins/main/icons/Auto_Subscribe_Assistant.png"
     # 插件版本
-    plugin_version = "3.1.0.2"
+    plugin_version = "3.1.0.3"
     # 插件作者
     plugin_author = "Aqr-K"
     # 作者主页
@@ -265,12 +265,30 @@ class AutomaticSubscriptionAssistant(_PluginBase):
                 logger.info(f"仅通知模式：{paused} 条订阅已保持暂停（不自动下载）")
             notified = self.get_data("notified") or {}
             hit, notified = notifycheck.check_available(
-                oper, SearchChain(), self.post_message, notified, gcfg.username)
+                oper, SearchChain(), self.post_message, notified, gcfg.username,
+                recognize=self.__recognize_for_notify)
             self.save_data("notified", notified)
             if hit:
                 logger.info(f"仅通知模式：本轮检测到 {hit} 条资源，已发通知")
         except Exception as exc:  # noqa: BLE001
             logger.error(f"仅通知模式：资源检测异常：{exc}")
+
+    def __recognize_for_notify(self, sub):
+        """仅通知模式的媒体识别：补「演员」等宿主媒体信息；失败返回 None（不影响通知）。"""
+        try:
+            from app.sdk.media import MetaInfo
+            year = getattr(sub, "year", None)
+            meta = MetaInfo(f"{sub.name} {year}" if year else sub.name)
+            media_source = getattr(sub, "media_source", None)
+            media_id = getattr(sub, "media_id", None)
+            if media_source and media_id:
+                return self.chain.recognize_media(
+                    meta=meta, media_source=media_source, media_id=media_id,
+                    mtype=getattr(sub, "type", None))
+            return self.chain.recognize_media(meta=meta)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"仅通知模式：媒体识别失败（忽略）：{exc}")
+            return None
 
     def run_provider(self, provider_id: str, subscribed_index: Optional[SubscribedIndex] = None):
         """执行单个来源：装配上下文 + 历史 + Runner 并运行，整源异常兜底提示。

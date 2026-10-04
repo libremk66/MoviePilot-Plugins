@@ -118,7 +118,13 @@
               <div class="asa-section__rows">
                 <div v-for="field in sec.fields" :key="field.key" :class="rowClass(field)">
                   <div class="asa-row__copy">
-                    <div class="asa-row__label">{{ field.label }}</div>
+                    <div class="asa-row__label">
+                      {{ field.label }}
+                      <template v-if="field.info">
+                        <v-icon size="14" color="grey" class="ms-1">mdi-information-outline</v-icon>
+                        <v-tooltip activator="parent" location="top" max-width="400" :text="field.info" />
+                      </template>
+                    </div>
                     <p v-if="field.hint">{{ field.hint }}</p>
                   </div>
                   <div class="asa-row__control">
@@ -387,7 +393,8 @@ const MSG = {
     'g.exist_ok.label': '媒体库已存在仍订阅', 'g.exist_ok.hint': '媒体库已有资源时仍允许添加订阅',
     'g.history_keep.label': '历史保留条数', 'g.history_keep.hint': '每轮运行后只保留最近若干条历史，0 表示不限制',
     secHistory: '历史记录',
-    'g.notify_only.label': '仅通知模式', 'g.notify_only.hint': '开启：订阅只检测不自动下载，检测到资源后发通知；关闭：恢复自动下载',
+    'g.notify_only.label': '仅通知模式',
+    'g.notify_only.info': '两条配套规则：① 在「订阅管理」页对某条订阅点「豁免仅通知」→ 它恢复下载，且以后不再被本模式自动暂停（卡片标「已豁免」）；点「取消豁免」可重新纳入。② 只点「恢复」而未豁免的订阅，会在下一轮检测（≤6 小时）被重新按回暂停——想长期恢复某条，请用「豁免仅通知」。', 'g.notify_only.hint': '开启：订阅只检测不自动下载，检测到资源后发通知；关闭：恢复自动下载',
     'g.check_cron.label': '资源检测周期', 'g.check_cron.hint': 'cron 表达式，默认每 6 小时（0 */6 * * *）',
     'g.onlyonce.label': '保存后立即运行一次', 'g.onlyonce.hint': '保存后运行所有启用来源一次，随后自动复位',
     'g.clear.label': '清空历史记录', 'g.clear.hint': '保存后清空全部订阅历史，随后自动复位',
@@ -416,7 +423,8 @@ const MSG = {
     'g.exist_ok.label': '媒體庫已存在仍訂閱', 'g.exist_ok.hint': '媒體庫已有資源時仍允許新增訂閱',
     'g.history_keep.label': '歷史保留筆數', 'g.history_keep.hint': '每輪執行後只保留最近若干筆歷史，0 表示不限制',
     secHistory: '歷史記錄',
-    'g.notify_only.label': '僅通知模式', 'g.notify_only.hint': '開啟：訂閱只檢測不自動下載，偵測到資源後發通知；關閉：恢復自動下載',
+    'g.notify_only.label': '僅通知模式',
+    'g.notify_only.info': '兩條配套規則：① 在「訂閱管理」頁對某條訂閱點「豁免僅通知」→ 它恢復下載，且之後不再被本模式自動暫停（卡片標「已豁免」）；點「取消豁免」可重新納入。② 只點「恢復」而未豁免的訂閱，會在下一輪檢測（≤6 小時）被重新按回暫停——想長期恢復某條，請用「豁免僅通知」。', 'g.notify_only.hint': '開啟：訂閱只檢測不自動下載，偵測到資源後發通知；關閉：恢復自動下載',
     'g.check_cron.label': '資源檢測週期', 'g.check_cron.hint': 'cron 表達式，預設每 6 小時（0 */6 * * *）',
     'g.onlyonce.label': '儲存後立即執行一次', 'g.onlyonce.hint': '儲存後執行所有啟用來源一次，隨後自動復位',
     'g.clear.label': '清空歷史記錄', 'g.clear.hint': '儲存後清空全部訂閱歷史，隨後自動復位',
@@ -445,7 +453,8 @@ const MSG = {
     'g.exist_ok.label': 'Subscribe even if in library', 'g.exist_ok.hint': 'Allow adding subscriptions even when already in the library',
     'g.history_keep.label': 'History retention', 'g.history_keep.hint': 'Keep only the most recent N history entries after each run; 0 means unlimited',
     secHistory: 'History',
-    'g.notify_only.label': 'Notify-only mode', 'g.notify_only.hint': 'On: subscriptions are detected but never auto-downloaded; you get a notification when a resource appears. Off: restore auto-download',
+    'g.notify_only.label': 'Notify-only mode',
+    'g.notify_only.info': 'Two companion rules: (1) In the Subscription manager, choose "Exempt from notify-only" on a subscription to resume downloading it and stop auto-pausing it (the card is marked as exempt); choose "Remove exemption" to bring it back. (2) Subscriptions resumed without an exemption will be paused again on the next check round (within 6 hours) — use the exemption for a lasting resume.', 'g.notify_only.hint': 'On: subscriptions are detected but never auto-downloaded; you get a notification when a resource appears. Off: restore auto-download',
     'g.check_cron.label': 'Resource check schedule', 'g.check_cron.hint': 'cron expression, default every 6 hours (0 */6 * * *)',
     'g.onlyonce.label': 'Run once after saving', 'g.onlyonce.hint': 'Run all enabled sources once after saving, then auto-reset',
     'g.clear.label': 'Clear history', 'g.clear.hint': 'Clear all subscription history after saving, then auto-reset',
@@ -484,7 +493,7 @@ const GLOBAL_DEFAULTS = { enabled: false, notify: false, notify_only: true, chec
 const GLOBAL_SECTIONS = [
   { titleKey: 'secRunning', fields: [{ key: 'enabled', kind: 'switch' }, { key: 'notify', kind: 'switch' }] },
   { titleKey: 'secSubscription', fields: [{ key: 'username', kind: 'text' }, { key: 'exist_ok', kind: 'switch' }] },
-  { titleKey: 'secNotifyOnly', fields: [{ key: 'notify_only', kind: 'switch' }, { key: 'check_cron', kind: 'text' }] },
+  { titleKey: 'secNotifyOnly', fields: [{ key: 'notify_only', kind: 'switch', info: 'g.notify_only.info' }, { key: 'check_cron', kind: 'text' }] },
   { titleKey: 'secHistory', fields: [{ key: 'history_keep', kind: 'number' }] },
   { titleKey: 'secOneTime', fields: [{ key: 'onlyonce', kind: 'switch' }, { key: 'clear', kind: 'switch' }] },
 ]
@@ -604,7 +613,7 @@ const config = reactive({
 
 const globalSections = computed(() => GLOBAL_SECTIONS.map(s => ({
   title: t(s.titleKey),
-  fields: s.fields.map(f => ({ key: f.key, kind: f.kind, label: t(`g.${f.key}.label`), hint: t(`g.${f.key}.hint`) })),
+  fields: s.fields.map(f => ({ key: f.key, kind: f.kind, label: t(`g.${f.key}.label`), hint: t(`g.${f.key}.hint`), info: f.info ? t(f.info) : '' })),
 })))
 
 const groups = computed(() => [

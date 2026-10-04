@@ -14,10 +14,16 @@ NOTIFY_TTL_DAYS = 3
 MAX_PER_RUN = 50
 
 
-def pause_active(oper, username: str) -> int:
-    """把该插件仍处于「订阅中(R)」的订阅置为暂停(S)。返回处理条数。"""
+def pause_active(oper, username: str, exempt=None) -> int:
+    """把该插件仍处于「订阅中(R)」的订阅置为暂停(S)。返回处理条数。
+
+    ``exempt`` 里的订阅 id（「仅通知豁免」名单）跳过不动：那是用户手动决定要追的。
+    """
+    exempt = set(exempt or [])
     n = 0
     for sub in oper.list_by_username(username, state="R") or []:
+        if getattr(sub, "id", None) in exempt:
+            continue
         try:
             oper.update(sub.id, {"state": "S"})
             n += 1

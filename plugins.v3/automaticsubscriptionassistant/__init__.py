@@ -56,7 +56,7 @@ class AutomaticSubscriptionAssistant(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/Aqr-K/MoviePilot-Plugins/main/icons/Auto_Subscribe_Assistant.png"
     # 插件版本
-    plugin_version = "3.1.0.1"
+    plugin_version = "3.1.0.2"
     # 插件作者
     plugin_author = "Aqr-K"
     # 作者主页
@@ -259,7 +259,8 @@ class AutomaticSubscriptionAssistant(_PluginBase):
             from .core import notifycheck
 
             oper = SubscribeOper()
-            paused = notifycheck.pause_active(oper, gcfg.username)
+            exempt = set(self.__notify_exempt_ids())
+            paused = notifycheck.pause_active(oper, gcfg.username, exempt)
             if paused:
                 logger.info(f"仅通知模式：{paused} 条订阅已保持暂停（不自动下载）")
             notified = self.get_data("notified") or {}
@@ -493,6 +494,10 @@ class AutomaticSubscriptionAssistant(_PluginBase):
             {
                 "path": "/subscribes/state", "endpoint": self.api_subscribes_state, "methods": ["POST"],
                 "auth": "bear", "summary": "批量暂停/恢复", "description": "按订阅ID列表批量置状态（S暂停/R恢复）",
+            },
+            {
+                "path": "/subscribes/exempt", "endpoint": self.api_subscribes_exempt, "methods": ["POST"],
+                "auth": "bear", "summary": "仅通知豁免", "description": "加入/取消「仅通知豁免」：豁免后恢复下载，且不再被仅通知模式自动暂停",
             },
             {
                 "path": "/system/share", "endpoint": self.api_get_share, "methods": ["GET"],
@@ -819,6 +824,9 @@ class AutomaticSubscriptionAssistant(_PluginBase):
         """列出本插件创建的订阅。"""
         try:
             rows = self.__subscribe_manager().list_mine()
+            exempt = set(self.__notify_exempt_ids())
+            for row in rows:
+                row["notify_exempt"] = row.get("id") in exempt
             return {"list": rows, "total": len(rows)}
         except Exception as exc:  # noqa: BLE001
             logger.error(f"{self.plugin_name}：读取订阅列表失败: {exc}")
@@ -835,6 +843,38 @@ class AutomaticSubscriptionAssistant(_PluginBase):
         except Exception as exc:  # noqa: BLE001
             logger.error(f"{self.plugin_name}：批量退订失败: {exc}")
             return {"code": 1, "message": f"退订失败: {exc}"}
+
+    def __notify_exempt_ids(self) -> list:
+        """「仅通知豁免」名单（订阅 id 列表）：豁免的订阅恢复下载且不再被自动暂停。"""
+        try:
+            raw = self.get_data("notify_exempt") or []
+            return [int(x) for x in raw if str(x).lstrip("-").isdigit()]
+        except Exception:  # noqa: BLE001
+            return []
+
+    def api_subscribes_exempt(self, request: dict = None) -> Dict[str, Any]:
+        """仅通知豁免：body={"ids":[...],"exempt":true|false}
+        exempt=true  → 恢复为「订阅中(R)」并加入豁免（仅通知模式不再暂停它）
+        exempt=false → 重新纳入仅通知（置「暂停(S)」并移出豁免）
+        """
+        body = request if isinstance(request, dict) else {}
+        ids = body.get("ids")
+        exempt = bool(body.get("exempt"))
+        if not isinstance(ids, list) or not ids:
+            return {"code": 1, "message": "缺少 ids 列表"}
+        try:
+            res = self.__subscribe_manager().set_state(ids, "R" if exempt else "S")
+            cur = set(self.__notify_exempt_ids())
+            ok_ids = {int(i) for i in ids if str(i).lstrip("-").isdigit()}
+            cur = (cur | ok_ids) if exempt else (cur - ok_ids)
+            self.save_data("notify_exempt", sorted(cur))
+            label = "已豁免仅通知并恢复下载" if exempt else "已重新纳入仅通知"
+            return {"code": 0, "message": f"{label} {res['ok']} 个" + (f"，{res['failed']} 个失败" if res["failed"] else ""), **res}
+        except ValueError as exc:
+            return {"code": 1, "message": str(exc)}
+        except Exception as exc:  # noqa: BLE001
+            logger.error(f"{self.plugin_name}：仅通知豁免操作失败: {exc}")
+            return {"code": 1, "message": f"操作失败: {exc}"}
 
     def api_subscribes_state(self, request: dict = None) -> Dict[str, Any]:
         """批量暂停/恢复（body={"ids":[...],"state":"S|R"}）。"""

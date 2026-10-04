@@ -60,7 +60,7 @@
         :poster="item.poster || ''"
         :name="item.name || t('unknown')"
         :lines="cardLines(item)"
-        :status="stateBadge(item.state)"
+        :status="stateBadge(item.state, item.notify_exempt)"
         :selectable="selectMode"
         :selected="selected.has(item.id)"
         :more-label="t('more')"
@@ -69,6 +69,8 @@
         <template #actions>
           <v-list-item v-if="item.state === 'S'" base-color="success" prepend-icon="mdi-play" :title="t('resume')" @click="askOne('resume', item)" />
           <v-list-item v-else base-color="warning" prepend-icon="mdi-pause" :title="t('pause')" @click="askOne('pause', item)" />
+          <v-list-item v-if="item.notify_exempt" base-color="info" prepend-icon="mdi-shield-off-outline" :title="t('unexempt')" @click="askOne('unexempt', item)" />
+          <v-list-item v-else base-color="info" prepend-icon="mdi-shield-check-outline" :title="t('exempt')" @click="askOne('exempt', item)" />
           <v-list-item base-color="error" prepend-icon="mdi-bell-off-outline" :title="t('unsub')" @click="askOne('delete', item)" />
         </template>
       </MediaCard>
@@ -132,7 +134,10 @@ const MSG = {
   'zh-CN': {
     select: '多选', exitSelect: '退出多选', selectedN: '已选 {n} 项', searchPh: '搜索名称…',
     selPage: '选本页', selAll: '选全部（{n}）', selClear: '清除选择',
-    resume: '恢复', pause: '暂停', unsub: '退订', cancel: '取消', ok: '确定', unknown: '未知', more: '更多',
+    resume: '恢复', pause: '暂停', unsub: '退订', exempt: '豁免仅通知', unexempt: '取消豁免', exemptMark: '已豁免',
+    titleExempt: '豁免确认', titleUnexempt: '取消豁免确认',
+    confirmExempt: '确认豁免选中的 {n} 个订阅？豁免后将恢复下载，且不再被仅通知模式自动暂停。',
+    confirmUnexempt: '确认取消豁免选中的 {n} 个订阅？它们将重新纳入仅通知（暂停，不自动下载）。', cancel: '取消', ok: '确定', unknown: '未知', more: '更多',
     all: '全部', 'st.R': '订阅中', 'st.N': '新建', 'st.P': '待定', 'st.S': '已暂停',
     filter: '筛选', filterTitle: '筛选与搜索', filterType: '类型', filterStatus: '状态', filterYear: '发行年份',
     yearFrom: '起始年', yearTo: '结束年', filterAll: '全部', searchLabel: '搜索', applyFilter: '应用', resetFilter: '重置',
@@ -147,7 +152,10 @@ const MSG = {
   'zh-TW': {
     select: '多選', exitSelect: '退出多選', selectedN: '已選 {n} 項', searchPh: '搜尋名稱…',
     selPage: '選本頁', selAll: '選全部（{n}）', selClear: '清除選擇',
-    resume: '恢復', pause: '暫停', unsub: '退訂', cancel: '取消', ok: '確定', unknown: '未知', more: '更多',
+    resume: '恢復', pause: '暫停', unsub: '退訂', exempt: '豁免僅通知', unexempt: '取消豁免', exemptMark: '已豁免',
+    titleExempt: '豁免確認', titleUnexempt: '取消豁免確認',
+    confirmExempt: '確認豁免選取的 {n} 個訂閱？豁免後將恢復下載，且不再被僅通知模式自動暫停。',
+    confirmUnexempt: '確認取消豁免選取的 {n} 個訂閱？它們將重新納入僅通知（暫停，不自動下載）。', cancel: '取消', ok: '確定', unknown: '未知', more: '更多',
     all: '全部', 'st.R': '訂閱中', 'st.N': '新建', 'st.P': '待定', 'st.S': '已暫停',
     filter: '篩選', filterTitle: '篩選與搜尋', filterType: '類型', filterStatus: '狀態', filterYear: '發行年份',
     yearFrom: '起始年', yearTo: '結束年', filterAll: '全部', searchLabel: '搜尋', applyFilter: '套用', resetFilter: '重設',
@@ -162,7 +170,10 @@ const MSG = {
   'en-US': {
     select: 'Select', exitSelect: 'Done', selectedN: '{n} selected', searchPh: 'Search name…',
     selPage: 'This page', selAll: 'All ({n})', selClear: 'Clear',
-    resume: 'Resume', pause: 'Pause', unsub: 'Unsubscribe', cancel: 'Cancel', ok: 'OK', unknown: 'Unknown', more: 'More',
+    resume: 'Resume', pause: 'Pause', unsub: 'Unsubscribe', exempt: 'Exempt from notify-only', unexempt: 'Remove exemption', exemptMark: 'exempt',
+    titleExempt: 'Exemption', titleUnexempt: 'Remove exemption',
+    confirmExempt: 'Exempt {n} subscription(s)? They resume downloading and are no longer auto-paused by notify-only mode.',
+    confirmUnexempt: 'Remove exemption from {n} subscription(s)? They go back to notify-only (paused, no auto-download).', cancel: 'Cancel', ok: 'OK', unknown: 'Unknown', more: 'More',
     all: 'All', 'st.R': 'Active', 'st.N': 'New', 'st.P': 'Pending', 'st.S': 'Paused',
     filter: 'Filters', filterTitle: 'Filter & search', filterType: 'Type', filterStatus: 'Status', filterYear: 'Release year',
     yearFrom: 'From', yearTo: 'To', filterAll: 'All', searchLabel: 'Search', applyFilter: 'Apply', resetFilter: 'Reset',
@@ -251,17 +262,18 @@ const activeFilterCount = computed(() =>
   (filters.yearMin != null || filters.yearMax != null ? 1 : 0) +
   (filters.mtype ? 1 : 0) + (filters.statuses.length ? 1 : 0))
 const hasFilter = computed(() => activeFilterCount.value > 0)
-const confirmTitle = computed(() => t({ delete: 'titleDelete', pause: 'titlePause', resume: 'titleResume' }[confirm.kind]))
-const confirmText = computed(() => t({ delete: 'confirmDelete', pause: 'confirmPause', resume: 'confirmResume' }[confirm.kind], { n: confirm.ids.length }))
+const confirmTitle = computed(() => t({ delete: 'titleDelete', pause: 'titlePause', resume: 'titleResume', exempt: 'titleExempt', unexempt: 'titleUnexempt' }[confirm.kind]))
+const confirmText = computed(() => t({ delete: 'confirmDelete', pause: 'confirmPause', resume: 'confirmResume', exempt: 'confirmExempt', unexempt: 'confirmUnexempt' }[confirm.kind], { n: confirm.ids.length }))
 
 function cssColor(name) {
   if (THEME_COLORS[name]) return `rgb(var(--v-theme-${name}))`
   return 'rgba(var(--v-theme-on-surface), 0.45)'
 }
-function stateBadge(state) {
+function stateBadge(state, exempt) {
   const m = STATE_META[state] || { color: 'grey', icon: 'mdi-bell-outline' }
-  const label = MSG['zh-CN']['st.' + state] ? t('st.' + state) : (state || t('unknown'))
-  return { label, color: cssColor(m.color), icon: m.icon }
+  let label = MSG['zh-CN']['st.' + state] ? t('st.' + state) : (state || t('unknown'))
+  if (exempt) label += ' · ' + t('exemptMark')
+  return { label, color: cssColor(exempt ? 'info' : m.color), icon: exempt ? 'mdi-shield-check-outline' : m.icon }
 }
 function cardLines(item) {
   return [
@@ -291,6 +303,8 @@ async function runConfirm() {
     if (!props.api || typeof props.api.post !== 'function') throw new Error('API')
     if (confirm.kind === 'delete') {
       await props.api.post(`${PLUGIN}/subscribes/delete`, { ids: confirm.ids })
+    } else if (confirm.kind === 'exempt' || confirm.kind === 'unexempt') {
+      await props.api.post(`${PLUGIN}/subscribes/exempt`, { ids: confirm.ids, exempt: confirm.kind === 'exempt' })
     } else {
       await props.api.post(`${PLUGIN}/subscribes/state`, { ids: confirm.ids, state: confirm.kind === 'pause' ? 'S' : 'R' })
     }

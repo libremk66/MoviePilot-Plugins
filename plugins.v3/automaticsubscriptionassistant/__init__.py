@@ -56,7 +56,7 @@ class AutomaticSubscriptionAssistant(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/Aqr-K/MoviePilot-Plugins/main/icons/Auto_Subscribe_Assistant.png"
     # 插件版本
-    plugin_version = "3.1.0.3"
+    plugin_version = "3.1.0.4"
     # 插件作者
     plugin_author = "Aqr-K"
     # 作者主页
@@ -248,8 +248,11 @@ class AutomaticSubscriptionAssistant(_PluginBase):
     # ------------------------------------------------------------------ #
     # 运行
     # ------------------------------------------------------------------ #
-    def __run_notify_check(self) -> None:
-        """仅通知模式：把本插件订阅保持暂停，并检测资源→通知（绝不下载）。"""
+    def __run_notify_check(self, force: bool = False) -> None:
+        """仅通知模式：把本插件订阅保持暂停，并检测资源→通知（绝不下载）。
+
+        ``force=True``（手动触发验证用）忽略 3 天通知 TTL。
+        """
         try:
             gcfg = self._settings.global_config
             if not gcfg.notify_only:
@@ -266,7 +269,9 @@ class AutomaticSubscriptionAssistant(_PluginBase):
             notified = self.get_data("notified") or {}
             hit, notified = notifycheck.check_available(
                 oper, SearchChain(), self.post_message, notified, gcfg.username,
-                recognize=self.__recognize_for_notify)
+                recognize=self.__recognize_for_notify,
+                downloadchain=self._downloadchain, subscribechain=self._subscribechain,
+                force=force)
             self.save_data("notified", notified)
             if hit:
                 logger.info(f"仅通知模式：本轮检测到 {hit} 条资源，已发通知")
@@ -274,19 +279,22 @@ class AutomaticSubscriptionAssistant(_PluginBase):
             logger.error(f"仅通知模式：资源检测异常：{exc}")
 
     def __recognize_for_notify(self, sub):
-        """仅通知模式的媒体识别：补「演员」等宿主媒体信息；失败返回 None（不影响通知）。"""
+        """仅通知模式的媒体识别（对齐宿主 prepare_search_target）。
+
+        旧实现把中文串 ``sub.type`` 当 mtype 传给 recognize_media（应为 MediaType 枚举），
+        且用 ``MetaInfo(f"{name} {year}")`` 拼年份——识别缓存路径直接崩溃，
+        演员/评分行静默丢失。改用宿主的 build_subscribe_meta 范式（内部完成
+        类型转换、年份、季号与识别身份参数）。
+        """
         try:
-            from app.sdk.media import MetaInfo
-            year = getattr(sub, "year", None)
-            meta = MetaInfo(f"{sub.name} {year}" if year else sub.name)
-            media_source = getattr(sub, "media_source", None)
-            media_id = getattr(sub, "media_id", None)
-            if media_source and media_id:
-                return self.chain.recognize_media(
-                    meta=meta, media_source=media_source, media_id=media_id,
-                    mtype=getattr(sub, "type", None))
-            return self.chain.recognize_media(meta=meta)
-        except Exception as exc:  # noqa: BLE001
+            from app.application.subscription.contract import build_subscribe_meta
+            from app.chain.subscribe.identity import subscribe_recognize_kwargs
+
+            meta = build_subscribe_meta(sub)
+            return self.chain.recognize_media(
+                meta=meta, mtype=meta.type, **subscribe_recognize_kwargs(sub),
+                episode_group=getattr(sub, "episode_group", None), cache=False)
+        except Exception as exc:  # noqa: BLE001 - 识别失败仅跳过本轮该条
             logger.debug(f"仅通知模式：媒体识别失败（忽略）：{exc}")
             return None
 
@@ -523,6 +531,11 @@ class AutomaticSubscriptionAssistant(_PluginBase):
                 "description": "读取 MoviePilot 全局『订阅数据共享』(SUBSCRIBE_STATISTIC_SHARE) 状态（热门媒体依赖）",
             },
             {
+                "path": "/notifycheck/run", "endpoint": self.api_notifycheck_run, "methods": ["POST"],
+                "auth": "bear", "summary": "手动执行资源检测",
+                "description": "触发一次仅通知模式资源检测（3 秒后运行；force=true 忽略 3 天通知 TTL，供验证）",
+            },
+            {
                 "path": "/system/share", "endpoint": self.api_set_share, "methods": ["POST"],
                 "auth": "bear", "summary": "设置订阅数据共享",
                 "description": "开/关 MoviePilot 全局『订阅数据共享』并持久化（改内存+落 app.env，无需重启）",
@@ -646,6 +659,19 @@ class AutomaticSubscriptionAssistant(_PluginBase):
             return {"code": 1, "message": f"未知来源: {pid}"}
         self.__schedule_once(self.run_provider, provider_id=pid)
         return {"code": 0, "message": f"{provider.provider_name} 已触发，将在 3 秒后运行"}
+
+    def api_notifycheck_run(self, request: dict = None) -> Dict[str, Any]:
+        """手动触发一次仅通知模式资源检测（3 秒后运行，立即返回）。
+
+        ``force=true``（body 或默认 False）忽略 3 天通知 TTL，用于部署后验证；
+        仍绝不下载、不改订阅状态。
+        """
+        if not self._settings.global_config.notify_only:
+            return {"code": 1, "message": "仅通知模式未开启，无需检测"}
+        force = bool((request or {}).get("force")) if isinstance(request, dict) else False
+        self.__schedule_once(self.__run_notify_check, force=force)
+        return {"code": 0, "message": "资源检测已触发，将在 3 秒后运行"
+                                       + ("（已忽略通知 TTL）" if force else "")}
 
     def api_test_provider(self, request: dict = None, provider_id: str = None) -> Dict[str, Any]:
         """连通性测试：抓取该来源前几条以验证可达，**绝不进入订阅管线、绝不订阅、绝不写历史**。

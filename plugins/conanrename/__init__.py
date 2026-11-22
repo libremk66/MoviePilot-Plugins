@@ -1,32 +1,32 @@
 # coding=UTF-8
 """
-柯南集数映射重命名（ConanRename）
+柯南全流程入库（ConanRename 2.0.0）
 
-按「银色子弹数据站」(sbsub) 的权威映射，把**拆分版集号**改名为 **TMDB 集号**，
-解决"固定偏移（如 -60）在同一批次里也会变化"导致的错名问题。
+一条插件搞定柯南的「监听 → 集号换算 → 硬链入库 → 订阅事实同步」，替代原先
+「LinkMonitorPlus 硬链 + 本插件改名 + CloudLinkMonitor 入库」三段式。
 
-典型流水线：
-    订阅 → 1柯南做种 →【实时硬链接】→ 2柯南硬链 →【本插件】→ 3柯南重命名 →【目录实时监控】→ 入库刮削
+集号换算优先级（v2.0.0 核心）：
+    1. 补充映射（extra_map，手工指定，如 1262=S0E34）
+    2. sbsub 精确映射
+    3. **tail 偏移外推**：sbsub 对当周新集通常滞后数小时到一天。此时沿用
+       映射表最后一段的偏移（与订阅识别词用的偏移同源），保证"下载时算出的集号"
+       与"入库时算出的集号"永远一致。
+    4. 超出宽限窗口 / 解析不出集号 → 隔离区，不碰媒体库，下轮重试并告警
 
-识别词同步（v1.1.0 新增）：
-    订阅搜索时 MP 用「自定义识别词」把种子名里的拆分版集号换算成 TMDB 集号。
-    固定偏移（如 EP-60）只在某一段集号内正确 —— 本插件按当前映射的**每个偏移区间**
-    各生成一条「区间限定」识别词，写回所选订阅的 custom_words，并可设定时同步。
-
-    规则形如：Conan\\.S01E(?=12(?:4[6-9]|5[0-9]|6[01])(?:\\D|$)) <> \\.1996 >> EP-59
-    （前定位词 + 区间断言 <> 后定位词 >> 集数偏移，只对该区间的集号生效）
+外推记录会写进账本（source=extrapolated）。sbsub 后续补上精确映射且与外推值
+不同时，插件自动把库里的文件改名到正确集号（连带 nfo/jpg），并发通知。
 
 安全约定：
-    · 目标文件已存在时**跳过并告警**，绝不覆盖
-    · 映射里查不到的集号 → 移到目标目录下的 `_待人工/`，不猜、不改
-    · 支持「仅预演」，先看清单再实际执行
-    · 每次实际改名都会写清单（插件数据目录 rename-YYYYMMDD.jsonl），可人工回滚
+    · 入库走宿主 TransferChain，类型固定 link，源文件（做种）永不移动/删除
+    · 目标已存在时不覆盖（overwrite_mode=never）
+    · 同源文件按 (size, mtime, ino) 指纹判重，重下/替换会自动重跑
+    · 支持「仅预演」：只打印计划，不调宿主、不写库
     · 识别词只写进插件自己维护的注释区块，订阅里其它识别词一律不动
 """
 import json
 import os
 import re
-import shutil
+import threading
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -34,6 +34,9 @@ from typing import Any, Dict, List, Optional, Tuple
 import requests
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
+from watchdog.events import FileSystemEventHandler
+from watchdog.observers import Observer
+from watchdog.observers.polling import PollingObserver
 
 from app import schemas
 from app.core.config import settings
@@ -54,21 +57,39 @@ EP_TOKEN = re.compile(r"S\d{1,2}E\d{1,4}(?:-part\d+)?")
 # 识别词同步：插件维护区块的标记（MP 会跳过 # 开头的行）
 SYNC_MARK_BEGIN = "# >>> ConanRename 自动同步（插件维护，请勿手改）"
 SYNC_MARK_END = "# <<< ConanRename 自动同步区块结束"
+# 账本文件名
+LEDGER_FILE = "pipeline.json"
+
+
+class _WatchHandler(FileSystemEventHandler):
+    """目录监控回调：把新增/移动的文件交给插件主流程。"""
+
+    def __init__(self, mon_path: str, plugin: "ConanRename"):
+        super().__init__()
+        self._mon_path = mon_path
+        self._plugin = plugin
+
+    def on_created(self, event):
+        if not event.is_directory:
+            self._plugin.enqueue_path(Path(event.src_path))
+
+    def on_moved(self, event):
+        if not event.is_directory:
+            self._plugin.enqueue_path(Path(event.dest_path))
 
 
 class ConanRename(_PluginBase):
     # 插件名称
-    plugin_name = "柯南集数映射重命名"
+    plugin_name = "柯南全流程入库"
     # 插件描述
     plugin_desc = (
-        "按银色子弹数据站(sbsub)的权威映射，把拆分版集号改名为 TMDB 集号"
-        "（自动处理 -partN 多段与特辑），解决固定偏移会漂移的问题；"
-        "并可按当前映射同步订阅的识别词、显示映射表。"
+        "柯南一站式入库：监听做种目录 → 按 sbsub 映射（缺失时用 tail 偏移外推）换算成 TMDB 集号 "
+        "→ 硬链入库并刮削。替代「硬链 + 改名 + 目录监控」三段式，新集不再因映射滞后掉进待人工。"
     )
     # 插件图标
     plugin_icon = "Linkace_C.png"
     # 插件版本
-    plugin_version = "1.1.1"
+    plugin_version = "2.0.0"
     # 插件作者
     plugin_author = "libremk66"
     # 作者主页
@@ -86,13 +107,26 @@ class ConanRename(_PluginBase):
     _notify: bool = False
     _onlyonce: bool = False
     _cron: Optional[str] = None
+    # 2.0 全流程
     _src_dir: str = ""
-    _dst_dir: str = ""
-    _mode: str = "move"
+    _library_dir: str = ""
+    _mode: str = "fast"            # fast / compatibility
+    _transfer_type: str = "link"
+    _scrape: bool = True
+    _overwrite_mode: str = "never"
+    _media_id: str = ""            # TMDB ID，留空则按标题识别
+    _media_title: str = ""
+    _category_folder: bool = True
+    _grace: int = 30               # 外推宽限窗口（集）
+    _quarantine_dir: str = ""
+    _bootstrap: bool = False       # 首次启用：把做种目录里已有的历史文件一次性入账（不重复入库）
+    # 映射
     _mapping_url: str = "https://cloud.sbsub.com/data/data.json"
     _extra_map: str = ""
     _dry_run: bool = False
-    _cache_hours: int = 12
+    _cache_minutes: int = 20
+    # 旧版改名（仅作为兼容/兜底，可留空）
+    _legacy_dst_dir: str = ""
     # 识别词同步
     _sync_enabled: bool = False
     _sync_onlyonce: bool = False
@@ -100,12 +134,16 @@ class ConanRename(_PluginBase):
     _sync_sub_ids: List[int] = []
     _sync_mode: str = "range"
     # 定位词要同时容忍「点」和「空格」两种分隔：本地文件名用点（Conan.S01E1215.1996），
-    # 站点种子名用空格（Conan S01E1215 1996）。只认点会让规则在订阅搜索时静默失效——
-    # words.py 里前定位词匹配不上就直接返回，整条偏移规则作废。
+    # 站点种子名用空格（Conan S01E1215 1996）。只认点会让规则在订阅搜索时静默失效。
     _sync_front: str = r"Conan[\s.]S01E"
     _sync_back: str = r"[\s.]1996"
     _sync_keep_others: bool = True
-    # 上次运行结果（供页面展示）
+    # 运行时
+    _observers: List[Any] = []
+    _queue: List[Path] = []
+    _debounce_timer: Optional[threading.Timer] = None
+    _debounce_lock = threading.Lock()
+    _run_lock = threading.Lock()
     _last_result: Dict[str, Any] = {}
     _last_sync: Dict[str, Any] = {}
 
@@ -120,16 +158,29 @@ class ConanRename(_PluginBase):
             self._onlyonce = bool(config.get("onlyonce"))
             self._cron = config.get("cron")
             self._src_dir = str(config.get("src_dir") or "").strip()
-            self._dst_dir = str(config.get("dst_dir") or "").strip()
-            self._mode = config.get("mode") or "move"
+            self._library_dir = str(config.get("library_dir") or "").strip()
+            self._mode = config.get("mode") or "fast"
+            self._transfer_type = config.get("transfer_type") or "link"
+            self._scrape = bool(config.get("scrape", True))
+            self._overwrite_mode = config.get("overwrite_mode") or "never"
+            self._media_id = str(config.get("media_id") or "").strip()
+            self._media_title = str(config.get("media_title") or "").strip()
+            self._category_folder = bool(config.get("category_folder", True))
+            try:
+                self._grace = max(0, int(config.get("grace") or 30))
+            except (TypeError, ValueError):
+                self._grace = 30
+            self._quarantine_dir = str(config.get("quarantine_dir") or "").strip()
+            self._bootstrap = bool(config.get("bootstrap"))
             self._mapping_url = str(config.get("mapping_url") or "").strip() or \
                 "https://cloud.sbsub.com/data/data.json"
             self._extra_map = config.get("extra_map") or ""
             self._dry_run = bool(config.get("dry_run"))
             try:
-                self._cache_hours = int(config.get("cache_hours") or 12)
+                self._cache_minutes = max(1, int(config.get("cache_minutes") or 20))
             except (TypeError, ValueError):
-                self._cache_hours = 12
+                self._cache_minutes = 20
+            self._legacy_dst_dir = str(config.get("legacy_dst_dir") or "").strip()
             # 识别词同步
             self._sync_enabled = bool(config.get("sync_enabled"))
             self._sync_onlyonce = bool(config.get("sync_onlyonce"))
@@ -142,7 +193,7 @@ class ConanRename(_PluginBase):
 
         pending_jobs: List[Dict[str, Any]] = []
         if self._enabled and self._onlyonce:
-            pending_jobs.append({"func": self.run_once, "name": "柯南映射重命名"})
+            pending_jobs.append({"func": self.run_once, "name": "柯南全流程入库"})
         if self._enabled and self._sync_enabled and self._sync_onlyonce:
             pending_jobs.append({"func": self.sync_words, "name": "柯南识别词同步"})
         if pending_jobs:
@@ -155,11 +206,48 @@ class ConanRename(_PluginBase):
             self._sync_onlyonce = False
             self.__update_config()
 
+        # fast 模式下启动实时监控
+        if self._enabled and self._mode == "fast" and self._src_dir:
+            self._start_watch()
+
+    def _start_watch(self):
+        """启动目录实时监控（fast 模式）。"""
+        src = Path(self._src_dir)
+        if not src.is_dir():
+            logger.error(f"柯南全流程：监控目录不存在：{src}")
+            return
+        try:
+            observer = PollingObserver(timeout=10) if self._mode == "compatibility" \
+                else Observer(timeout=10)
+            observer.schedule(_WatchHandler(str(src), self), path=str(src), recursive=True)
+            observer.daemon = True
+            observer.start()
+            self._observers.append(observer)
+            logger.info(f"柯南全流程：{src} 目录监控已启动（{self._mode}）")
+        except Exception as e:
+            err = str(e)
+            logger.error(f"柯南全流程：目录监控启动失败：{err}")
+            if "inotify" in err and "reached" in err:
+                logger.warn("请提高 fs.inotify.max_user_watches 后重启 MoviePilot")
+
     def get_state(self) -> bool:
         return self._enabled
 
     def stop_service(self):
-        """释放定时器。"""
+        """释放定时器与监控。"""
+        with self._debounce_lock:
+            if self._debounce_timer:
+                self._debounce_timer.cancel()
+                self._debounce_timer = None
+        try:
+            for observer in self._observers:
+                try:
+                    observer.stop()
+                except Exception:
+                    pass
+            self._observers = []
+        except Exception as e:
+            logger.error(f"柯南全流程：停止监控出错：{str(e)}")
         try:
             if self._scheduler:
                 self._scheduler.remove_all_jobs()
@@ -167,17 +255,17 @@ class ConanRename(_PluginBase):
                     self._scheduler.shutdown()
                 self._scheduler = None
         except Exception as e:
-            logger.error(f"柯南映射重命名：停止服务出错：{str(e)}")
+            logger.error(f"柯南全流程：停止服务出错：{str(e)}")
 
     def get_service(self) -> List[Dict[str, Any]]:
-        """注册定时服务（改名 + 识别词同步各一个）。"""
+        """注册定时服务（扫描 + 识别词同步）。"""
         services: List[Dict[str, Any]] = []
         if not self._enabled:
             return services
         if self._cron:
             services.append({
                 "id": "ConanRename",
-                "name": "柯南集数映射重命名",
+                "name": "柯南全流程入库",
                 "trigger": CronTrigger.from_crontab(self._cron),
                 "func": self.run_once,
                 "kwargs": {"manual": False},
@@ -197,10 +285,15 @@ class ConanRename(_PluginBase):
     def __update_config(self):
         self.update_config({
             "enabled": self._enabled, "notify": self._notify, "onlyonce": self._onlyonce,
-            "cron": self._cron, "src_dir": self._src_dir, "dst_dir": self._dst_dir,
-            "mode": self._mode, "mapping_url": self._mapping_url,
-            "extra_map": self._extra_map, "dry_run": self._dry_run,
-            "cache_hours": self._cache_hours,
+            "cron": self._cron, "src_dir": self._src_dir, "library_dir": self._library_dir,
+            "mode": self._mode, "transfer_type": self._transfer_type, "scrape": self._scrape,
+            "overwrite_mode": self._overwrite_mode, "media_id": self._media_id,
+            "media_title": self._media_title, "category_folder": self._category_folder,
+            "grace": self._grace, "quarantine_dir": self._quarantine_dir,
+            "bootstrap": self._bootstrap,
+            "mapping_url": self._mapping_url, "extra_map": self._extra_map,
+            "dry_run": self._dry_run, "cache_minutes": self._cache_minutes,
+            "legacy_dst_dir": self._legacy_dst_dir,
             "sync_enabled": self._sync_enabled, "sync_cron": self._sync_cron,
             "sync_onlyonce": self._sync_onlyonce,
             "sync_sub_ids": self._sync_sub_ids, "sync_mode": self._sync_mode,
@@ -249,68 +342,112 @@ class ConanRename(_PluginBase):
                         {"component": "VSwitch", "props": {"model": "enabled", "label": "启用插件"}}]},
                     {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
                         {"component": "VSwitch", "props": {"model": "notify", "label": "发送通知"}}]},
-                    {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [
-                        {"component": "VSwitch", "props": {"model": "dry_run", "label": "仅预演（不改名、不写识别词）"}}]},
-                    {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [
-                        {"component": "VSwitch", "props": {"model": "onlyonce", "label": "保存后立即改名一次"}}]},
+                    {"component": "VCol", "props": {"cols": 12, "md": 2}, "content": [
+                        {"component": "VSwitch", "props": {"model": "dry_run", "label": "仅预演"}}]},
+                    {"component": "VCol", "props": {"cols": 12, "md": 2}, "content": [
+                        {"component": "VSwitch", "props": {"model": "onlyonce", "label": "保存后立即执行"}}]},
                 ]},
-                {"component": "VRow", "content": [
-                    {"component": "VCol", "props": {"cols": 12}, "content": [
-                        {"component": "VTextField", "props": {
-                            "model": "src_dir", "label": "监控目录（递归扫描）",
-                            "placeholder": "/你的盘/MOVIEPILOT/柯南/2柯南硬链"}}]},
-                    {"component": "VCol", "props": {"cols": 12}, "content": [
-                        {"component": "VTextField", "props": {
-                            "model": "dst_dir", "label": "目标目录",
-                            "placeholder": "/你的盘/MOVIEPILOT/柯南/3柯南重命名"}}]},
-                ]},
+                {"component": "VAlert", "props": {
+                    "type": "info", "variant": "tonal", "class": "mb-2",
+                    "text": "全流程：监听做种目录 → 按 sbsub 映射换算集号（映射没到时沿用最后一段偏移外推）"
+                            "→ 硬链入库并刮削。源文件（做种）永不移动。"}},
                 {"component": "VRow", "content": [
                     {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
+                        {"component": "VTextField", "props": {
+                            "model": "src_dir", "label": "做种目录（监听）",
+                            "placeholder": "/你的盘/MOVIEPILOT/柯南/1柯南做种"}}]},
+                    {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
+                        {"component": "VTextField", "props": {
+                            "model": "library_dir", "label": "媒体库目录（入库目标）",
+                            "placeholder": "/你的盘/MOVIEPILOT/LINK/TV"}}]},
+                ]},
+                {"component": "VRow", "content": [
+                    {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
                         {"component": "VSelect", "props": {
-                            "model": "mode", "label": "处理方式",
+                            "model": "mode", "label": "监控模式",
                             "items": [
-                                {"title": "移动（源文件消失；源本身是硬链，做种不受影响）", "value": "move"},
-                                {"title": "硬链接（源文件保留）", "value": "link"},
+                                {"title": "fast（inotify 实时，推荐）", "value": "fast"},
+                                {"title": "compatibility（轮询，兼容 SMB/NFS）", "value": "compatibility"},
                             ]}}]},
-                    {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
+                    {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
+                        {"component": "VSelect", "props": {
+                            "model": "transfer_type", "label": "入库方式",
+                            "items": [
+                                {"title": "link（硬链，保留做种）", "value": "link"},
+                                {"title": "copy（复制）", "value": "copy"},
+                                {"title": "move（移动，⚠️ 会移走做种文件）", "value": "move"},
+                            ]}}]},
+                    {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
                         {"component": "VTextField", "props": {
-                            "model": "cron", "label": "改名定时（cron，留空=只手动）",
-                            "placeholder": "*/10 * * * *"}}]},
+                            "model": "cron", "label": "全量扫描定时（cron，留空=只靠实时）",
+                            "placeholder": "*/15 * * * *"}}]},
+                ]},
+                {"component": "VRow", "content": [
+                    {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
+                        {"component": "VTextField", "props": {
+                            "model": "media_id", "label": "TMDB ID（留空则按标题自动识别）",
+                            "placeholder": "30983"}}]},
+                    {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
+                        {"component": "VTextField", "props": {
+                            "model": "media_title", "label": "媒体标题（识别兜底用）",
+                            "placeholder": "名侦探柯南"}}]},
+                    {"component": "VCol", "props": {"cols": 12, "md": 2}, "content": [
+                        {"component": "VSwitch", "props": {"model": "scrape", "label": "刮削"}}]},
+                    {"component": "VCol", "props": {"cols": 12, "md": 2}, "content": [
+                        {"component": "VSwitch", "props": {"model": "category_folder", "label": "按类别建目录"}}]},
                 ]},
                 {"component": "VRow", "content": [
                     {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
                         {"component": "VTextField", "props": {
                             "model": "mapping_url", "label": "映射数据地址（sbsub）"}}]},
-                    {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
+                    {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [
                         {"component": "VTextField", "props": {
-                            "model": "cache_hours", "label": "映射缓存小时数", "type": "number"}}]},
+                            "model": "cache_minutes", "label": "映射缓存分钟数", "type": "number"}}]},
+                    {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [
+                        {"component": "VTextField", "props": {
+                            "model": "grace", "label": "外推宽限窗口（集）", "type": "number"}}]},
                 ]},
                 {"component": "VRow", "content": [
-                    {"component": "VCol", "props": {"cols": 12}, "content": [
+                    {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
                         {"component": "VTextarea", "props": {
                             "model": "extra_map", "label": "补充映射（每行：拆分版号=TMDB季集）",
                             "rows": 3, "placeholder": "1134=S0E32\n1262=S0E34"}}]},
+                    {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
+                        {"component": "VTextField", "props": {
+                            "model": "quarantine_dir", "label": "隔离目录（留空=媒体库下 _待人工）",
+                            "placeholder": "/你的盘/MOVIEPILOT/柯南/_隔离"}}]},
                 ]},
-                {"component": "VDivider", "props": {"class": "my-4"}},
                 {"component": "VRow", "content": [
                     {"component": "VCol", "props": {"cols": 12}, "content": [
-                        {"component": "VAlert", "props": {
-                            "type": "info", "variant": "tonal", "class": "mb-2",
-                            "text": "识别词同步：按当前映射的每个「偏移区间」生成区间限定识别词，"
-                                    "写回所选订阅的「自定义识别词」；只动插件自己维护的注释区块，"
-                                    "订阅里其它识别词不受影响。集号区间变了（新特辑插入）会自动跟着更新。"}}]},
+                        {"component": "VSwitch", "props": {
+                            "model": "bootstrap",
+                            "label": "首次启用：把做种目录里已有的历史文件一次性入账（只为防重复入库，第二次运行前请关闭）"}}]},
                 ]},
+                {"component": "VAlert", "props": {
+                    "type": "warning", "variant": "tonal", "class": "mb-2",
+                    "text": "隔离目录只放「真的判定不了」的文件（集号解析失败/超出外推窗口），"
+                            "不会自动入库，也不应加入任何目录监控。"}},
+                {"component": "VDivider", "props": {"class": "my-4"}},
                 {"component": "VRow", "content": [
                     {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
                         {"component": "VSwitch", "props": {"model": "sync_enabled", "label": "启用识别词同步"}}]},
                     {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
                         {"component": "VSwitch", "props": {"model": "sync_keep_others", "label": "保留订阅里其它识别词"}}]},
                     {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
-                        {"component": "VSwitch", "props": {"model": "sync_onlyonce", "label": "保存后立即同步一次识别词"}}]},
-                    {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
+                        {"component": "VSwitch", "props": {"model": "sync_onlyonce", "label": "保存后立即同步一次"}}]},
+                ]},
+                {"component": "VRow", "content": [
+                    {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
                         {"component": "VTextField", "props": {
                             "model": "sync_cron", "label": "同步定时（cron，留空=只手动）",
-                            "placeholder": "0 8 * * *"}}]},
+                            "placeholder": "0 2 * * *"}}]},
+                    {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
+                        {"component": "VSelect", "props": {
+                            "model": "sync_mode", "label": "识别词写法",
+                            "items": [
+                                {"title": "每个偏移区间一条（推荐）", "value": "range"},
+                                {"title": "只写最新偏移一条（旧区间不管）", "value": "tail"},
+                            ]}}]},
                 ]},
                 {"component": "VRow", "content": [
                     {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
@@ -318,13 +455,6 @@ class ConanRename(_PluginBase):
                             "model": "sync_sub_ids", "label": "目标订阅（可多选）",
                             "multiple": True, "chips": True, "clearable": True,
                             "items": self._subscribe_items()}}]},
-                    {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
-                        {"component": "VSelect", "props": {
-                            "model": "sync_mode", "label": "识别词写法",
-                            "items": [
-                                {"title": "每个偏移区间一条（推荐，历史缺集也能正确识别）", "value": "range"},
-                                {"title": "只写最新偏移一条（旧区间不管）", "value": "tail"},
-                            ]}}]},
                 ]},
                 {"component": "VRow", "content": [
                     {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
@@ -339,10 +469,17 @@ class ConanRename(_PluginBase):
             ]}
         ], {
             "enabled": self._enabled, "notify": self._notify, "dry_run": self._dry_run,
-            "onlyonce": self._onlyonce, "sync_onlyonce": self._sync_onlyonce,
-            "src_dir": self._src_dir, "dst_dir": self._dst_dir, "mode": self._mode,
+            "onlyonce": self._onlyonce,
+            "src_dir": self._src_dir, "library_dir": self._library_dir,
+            "mode": self._mode, "transfer_type": self._transfer_type,
+            "scrape": self._scrape, "category_folder": self._category_folder,
+            "overwrite_mode": self._overwrite_mode,
+            "media_id": self._media_id, "media_title": self._media_title,
+            "grace": self._grace, "quarantine_dir": self._quarantine_dir,
+            "bootstrap": self._bootstrap,
             "cron": self._cron, "mapping_url": self._mapping_url,
-            "cache_hours": self._cache_hours, "extra_map": self._extra_map,
+            "cache_minutes": self._cache_minutes, "extra_map": self._extra_map,
+            "legacy_dst_dir": self._legacy_dst_dir,
             "sync_enabled": self._sync_enabled, "sync_cron": self._sync_cron,
             "sync_onlyonce": self._sync_onlyonce,
             "sync_sub_ids": self._sync_sub_ids, "sync_mode": self._sync_mode,
@@ -351,23 +488,22 @@ class ConanRename(_PluginBase):
         }
 
     def get_page(self) -> List[dict]:
-        """页面：上次结果 + 识别词同步结果 + 当前映射表。"""
+        """页面：上次运行 + 账本 + 映射 + 识别词同步结果。"""
         content: List[dict] = []
 
-        # 1) 上次改名
         result = self._last_result or {}
         if result:
             content.append({"component": "VAlert", "props": {
-                "type": "warning" if (result.get("errors") or result.get("manual")) else "success",
+                "type": "warning" if (result.get("errors") or result.get("quarantined")) else "success",
                 "variant": "tonal", "class": "mb-2",
-                "text": f"上次改名 {result.get('time')}：扫描 {result.get('scanned')}｜"
-                        f"改名 {result.get('renamed')}｜跳过 {result.get('skipped')}｜"
-                        f"待人工 {result.get('manual')}｜错误 {len(result.get('errors') or [])}"}})
+                "text": f"上次运行 {result.get('time')}：扫描 {result.get('scanned')}｜"
+                        f"入库 {result.get('imported')}｜外推 {result.get('extrapolated')}｜"
+                        f"跳过 {result.get('skipped')}｜隔离 {result.get('quarantined')}｜"
+                        f"纠正 {result.get('corrected')}｜错误 {len(result.get('errors') or [])}"}})
         else:
             content.append({"component": "VAlert", "props": {
-                "type": "info", "variant": "tonal", "class": "mb-2", "text": "尚未运行过改名"}})
+                "type": "info", "variant": "tonal", "class": "mb-2", "text": "尚未运行过"}})
 
-        # 2) 上次识别词同步
         sync = self._last_sync or {}
         if sync:
             detail = "｜".join(sync.get("detail") or []) or "无变化"
@@ -376,18 +512,14 @@ class ConanRename(_PluginBase):
                 "variant": "tonal", "class": "mb-2",
                 "text": f"上次识别词同步 {sync.get('time')}：规则 {sync.get('rules')} 条｜"
                         f"更新 {sync.get('changed')} 个订阅｜不变 {sync.get('unchanged')} 个"
-                        + ("（预演）" if sync.get("dry_run") else "")
-                        + f"｜{detail}"}})
-        elif self._sync_enabled:
-            content.append({"component": "VAlert", "props": {
-                "type": "info", "variant": "tonal", "class": "mb-2", "text": "识别词同步已启用，尚未执行过"}})
+                        + ("（预演）" if sync.get("dry_run") else "") + f"｜{detail}"}})
 
-        # 3) 当前映射
+        # 映射概览
         try:
             data = self._load_mapping_data()
             mapping = self._build_mapping(data) if data else {}
         except Exception as e:
-            logger.error(f"柯南映射重命名：页面读取映射失败：{str(e)}")
+            logger.error(f"柯南全流程：页面读取映射失败：{str(e)}")
             mapping = {}
         if not mapping:
             content.append({"component": "VAlert", "props": {
@@ -395,41 +527,48 @@ class ConanRename(_PluginBase):
             return content
 
         ranges = self._compute_ranges(mapping)
-        rules = self._build_rules(ranges, self._sync_mode)
         tail = ranges[-1]
         content.append({"component": "VAlert", "props": {
             "type": "info", "variant": "tonal", "class": "mb-2",
             "text": f"当前映射 {len(mapping)} 条（拆分版 {min(mapping)}–{max(mapping)}）｜"
                     f"偏移区间 {len(ranges)} 段｜最新偏移 {tail['offset']:+d}"
                     f"（拆分 {tail['start']}–{tail['end']} → TMDB {tail['tmdb_start']}–{tail['tmdb_end']}）｜"
-                    f"识别词规则 {len(rules)} 条"}})
+                    f"外推上界 拆分 {max(mapping) + self._grace}"}})
 
-        # 区间表（倒序，最近的在前）
-        headers = [
-            {"title": "拆分版区间", "key": "split"},
-            {"title": "TMDB 区间", "key": "tmdb"},
-            {"title": "偏移", "key": "offset"},
-            {"title": "集数", "key": "count"},
-            {"title": "识别词规则", "key": "rule"},
-        ]
+        # 账本（最近 50 条）
         rows = []
-        for item, rule in zip(ranges, rules):
-            split = str(item["start"]) if item["start"] == item["end"] else f"{item['start']}–{item['end']}"
-            tmdb = str(item["tmdb_start"]) if item["tmdb_start"] == item["tmdb_end"] else \
-                f"{item['tmdb_start']}–{item['tmdb_end']}"
-            rows.append({"split": split, "tmdb": tmdb, "offset": f"{item['offset']:+d}",
-                         "count": item["count"], "rule": rule})
-        rows.reverse()
-        content.append({"component": "VDataTableVirtual", "props": {
-            "class": "text-sm", "headers": headers, "items": rows,
-            "height": "min(50vh, 28rem)", "density": "compact",
-            "fixed-header": True, "hide-no-data": True, "hover": True,
-            "items-per-page": -1}})
+        for src, item in sorted((self._load_ledger() or {}).items(),
+                                key=lambda kv: kv[1].get("updated_at") or "", reverse=True)[:50]:
+            rows.append({
+                "file": Path(src).name,
+                "split": item.get("split"),
+                "tmdb": item.get("tmdb"),
+                "source": {"exact": "精确", "extrapolated": "外推", "extra": "补充"}.get(
+                    item.get("source"), item.get("source")),
+                "stage": item.get("stage"),
+                "lib": Path(item.get("lib_path") or "").name,
+                "when": item.get("updated_at"),
+            })
+        if rows:
+            content.append({"component": "VDataTableVirtual", "props": {
+                "class": "text-sm",
+                "headers": [
+                    {"title": "文件", "key": "file"},
+                    {"title": "拆分版", "key": "split"},
+                    {"title": "TMDB", "key": "tmdb"},
+                    {"title": "来源", "key": "source"},
+                    {"title": "阶段", "key": "stage"},
+                    {"title": "库内文件", "key": "lib"},
+                    {"title": "更新时间", "key": "when"},
+                ],
+                "items": rows, "height": "min(50vh, 28rem)", "density": "compact",
+                "fixed-header": True, "hide-no-data": True, "hover": True,
+                "items-per-page": -1}})
         return content
 
     def get_command(self) -> List[Dict[str, Any]]:
         return [{"cmd": "/conan_rename", "event": EventType.PluginAction,
-                 "desc": "柯南映射重命名", "category": "管理",
+                 "desc": "柯南全流程入库（立即执行）", "category": "管理",
                  "data": {"action": "conan_rename"}},
                 {"cmd": "/conan_sync_words", "event": EventType.PluginAction,
                  "desc": "柯南识别词同步", "category": "管理",
@@ -437,11 +576,13 @@ class ConanRename(_PluginBase):
 
     def get_api(self) -> List[Dict[str, Any]]:
         return [{"path": "/conan_rename", "endpoint": self.api_run, "methods": ["GET"],
-                 "summary": "立即执行一次柯南映射重命名"},
+                 "summary": "立即执行一次柯南全流程入库"},
                 {"path": "/conan_sync_words", "endpoint": self.api_sync_words, "methods": ["GET"],
                  "summary": "立即同步一次识别词到订阅"},
                 {"path": "/conan_words_preview", "endpoint": self.api_words_preview, "methods": ["GET"],
-                 "summary": "预览将要写入的识别词（不写库）"}]
+                 "summary": "预览将要写入的识别词（不写库）"},
+                {"path": "/conan_ledger", "endpoint": self.api_ledger, "methods": ["GET"],
+                 "summary": "查看入库账本"}]
 
     @eventmanager.register(EventType.PluginAction)
     def remote_run(self, event: Event):
@@ -450,7 +591,7 @@ class ConanRename(_PluginBase):
         action = event.event_data.get("action")
         if action == "conan_rename":
             result = self.run_once(manual=True)
-            title = f"柯南映射重命名：改名 {result.get('renamed')} 个"
+            title = f"柯南全流程：入库 {result.get('imported')} 个"
         elif action == "conan_sync_words":
             result = self.sync_words(manual=True)
             title = f"柯南识别词同步：规则 {result.get('rules')} 条，更新 {result.get('changed')} 个订阅"
@@ -484,6 +625,11 @@ class ConanRename(_PluginBase):
             "front": self._sync_front, "back": self._sync_back, "mode": self._sync_mode,
         })
 
+    def api_ledger(self, apikey: str):
+        if apikey != settings.API_TOKEN:
+            return schemas.Response(success=False, message="API密钥错误")
+        return schemas.Response(success=True, data=self._load_ledger())
+
     # ─── 映射数据 ───
 
     def _cache_file(self) -> Path:
@@ -492,10 +638,10 @@ class ConanRename(_PluginBase):
     def _load_mapping_data(self) -> Optional[dict]:
         """取 sbsub 数据：优先用未过期缓存，失败则退回旧缓存。"""
         cache = self._cache_file()
-        if cache.exists() and self._cache_hours > 0:
+        if cache.exists() and self._cache_minutes > 0:
             try:
                 age = datetime.now() - datetime.fromtimestamp(cache.stat().st_mtime)
-                if age < timedelta(hours=self._cache_hours):
+                if age < timedelta(minutes=self._cache_minutes):
                     return json.loads(cache.read_text(encoding="utf-8"))
             except Exception as e:
                 logger.warning(f"读取映射缓存失败：{str(e)}")
@@ -513,6 +659,27 @@ class ConanRename(_PluginBase):
             try:
                 if cache.exists():
                     logger.warning("改用过期的映射缓存继续处理")
+                    return json.loads(cache.read_text(encoding="utf-8"))
+            except Exception:
+                pass
+            return None
+
+    def _force_refresh_mapping(self) -> Optional[dict]:
+        """遇到未映射集号时强制拉一次（限流：同一轮只拉一次，失败退回缓存）。"""
+        cache = self._cache_file()
+        try:
+            resp = requests.get(self._mapping_url, timeout=30,
+                                headers={"User-Agent": "Mozilla/5.0 MoviePilot-Plugin/ConanRename"})
+            resp.raise_for_status()
+            data = resp.json()
+            cache.parent.mkdir(parents=True, exist_ok=True)
+            cache.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+            logger.info("柯南全流程：因存在未映射集号，已强制刷新映射数据")
+            return data
+        except Exception as e:
+            logger.warning(f"柯南全流程：强制刷新映射失败（继续用缓存）：{str(e)}")
+            try:
+                if cache.exists():
                     return json.loads(cache.read_text(encoding="utf-8"))
             except Exception:
                 pass
@@ -666,9 +833,8 @@ class ConanRename(_PluginBase):
         return rules
 
     def _compose_words(self, existing: str, rules: List[str]) -> str:
-        """把规则写进插件维护的注释区块，保留订阅里其它识别词（含手工写的旧版同步规则）。"""
+        """把规则写进插件维护的注释区块，保留订阅里其它识别词。"""
         block = [SYNC_MARK_BEGIN, *rules, SYNC_MARK_END]
-        front = self._sync_front or r"Conan[\s.]S01E"
         kept: List[str] = []
         inside = False
         for line in (existing or "").splitlines():
@@ -681,10 +847,12 @@ class ConanRename(_PluginBase):
                 continue
             if inside or not stripped:
                 continue
-            # 丢掉"前定位词 <> … >> EP…"这类旧的手工同步规则，避免与新区间规则抢命中
-            if "<>" in stripped and ">>" in stripped:
+            # 丢掉旧版手工写的柯南同步规则，避免与新区间规则抢命中。
+            # 注意：识别词行里的前定位词本身是「正则文本」，不能拿它当正则去匹配这一行
+            # （否则 Conan[\s.]S01E 永远匹配不上字面量 "Conan[\s.]S01E <> …"）。
+            if "<>" in stripped and ">>" in stripped and "Conan" in stripped:
                 try:
-                    if re.match(front, stripped):
+                    if re.match(r"Conan", stripped):
                         continue
                 except re.error:
                     pass
@@ -759,6 +927,8 @@ class ConanRename(_PluginBase):
             )
         return result
 
+    # ─── 集号解析（2.0 核心） ───
+
     def _load_extra_map(self) -> Dict[int, str]:
         """补充映射，如 1262=S0E34。"""
         result: Dict[int, str] = {}
@@ -782,43 +952,154 @@ class ConanRename(_PluginBase):
                 return int(match.group(1))
         return None
 
+    def _resolve_episode(self, split_no: int, mapping: Dict[int, int],
+                         extra: Dict[int, str]) -> Tuple[Optional[int], Optional[int], str]:
+        """
+        拆分版集号 → (季, TMDB 集号)。
+
+        :return: (season, episode, 来源)。来源取值 exact / extra / extrapolated / none
+        """
+        if split_no in extra:
+            tag = extra[split_no]
+            match = re.search(r"S(\d+)E(\d+)", tag, re.I)
+            if match:
+                return int(match.group(1)), int(match.group(2)), "extra"
+        if split_no in mapping:
+            return 1, mapping[split_no], "exact"
+        if not mapping:
+            return None, None, "none"
+        # tail 偏移外推：与订阅识别词用的是同一段偏移，保证"下载算出的集号 == 入库算出的集号"
+        ranges = self._compute_ranges(mapping)
+        tail = ranges[-1]
+        max_split = max(mapping)
+        if split_no <= max_split + self._grace:
+            return 1, split_no + tail["offset"], "extrapolated"
+        return None, None, "none"
+
+    def _mapping_signature(self, mapping: Dict[int, int]) -> str:
+        """映射指纹：用于判断外推结论是否被新映射推翻。"""
+        if not mapping:
+            return ""
+        ranges = self._compute_ranges(mapping)
+        tail = ranges[-1]
+        return f"{max(mapping)}:{tail['offset']}"
+
+    # ─── 账本 ───
+
+    def _ledger_path(self) -> Path:
+        return self.get_data_path() / LEDGER_FILE
+
+    def _load_ledger(self) -> Dict[str, dict]:
+        path = self._ledger_path()
+        try:
+            if path.exists():
+                data = json.loads(path.read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    return data
+        except Exception as e:
+            logger.error(f"读取入库账本失败：{str(e)}")
+        return {}
+
+    def _save_ledger(self, ledger: Dict[str, dict]) -> None:
+        path = self._ledger_path()
+        try:
+            tmp = path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(ledger, ensure_ascii=False, indent=1), encoding="utf-8")
+            os.replace(tmp, path)
+        except Exception as e:
+            logger.error(f"写入库账本失败：{str(e)}")
+
+    @staticmethod
+    def _fingerprint(path: Path) -> Optional[dict]:
+        """文件指纹：大小 + 修改时间 + inode（重下/替换会自动失效）。"""
+        try:
+            st = path.stat()
+        except OSError:
+            return None
+        return {"size": st.st_size, "mtime": int(st.st_mtime), "ino": st.st_ino}
+
+    # ─── 实时队列 ───
+
+    def enqueue_path(self, path: Path) -> None:
+        """实时监控回调：放入待处理队列，并安排一次防抖执行。"""
+        try:
+            if not path.is_file():
+                return
+            if path.suffix.lower() not in MEDIA_EXT:
+                return
+            if path.name.startswith(".") or path.name.endswith(".part"):
+                return
+            if any(p.startswith(".") or p.startswith("@") for p in path.parts):
+                return
+            if path not in self._queue:
+                self._queue.append(path)
+            logger.debug(f"柯南全流程：收到待处理文件 {path.name}")
+            self._schedule_debounced_run()
+        except Exception as e:
+            logger.error(f"柯南全流程：入队失败：{str(e)}")
+
+    def _schedule_debounced_run(self) -> None:
+        """下载中的文件大小会持续变化，静默 60 秒后再处理。"""
+        with self._debounce_lock:
+            if self._debounce_timer:
+                self._debounce_timer.cancel()
+            timer = threading.Timer(60.0, self._debounced_run)
+            timer.daemon = True
+            timer.start()
+            self._debounce_timer = timer
+
+    def _debounced_run(self) -> None:
+        """防抖触发点：串行执行一次主流程。"""
+        if self._run_lock.acquire(blocking=False):
+            try:
+                self.run_once(manual=False)
+            except Exception as e:
+                logger.error(f"柯南全流程：实时处理失败：{str(e)}")
+            finally:
+                self._run_lock.release()
+
     # ─── 主流程 ───
 
     def run_once(self, manual: bool = False) -> Dict[str, Any]:
-        """扫描 → 映射 → 改名，返回统计结果。"""
+        """扫描 → 换算集号 → 硬链入库 → 核对账本。"""
+        with self._run_lock:
+            return self._run_once_locked(manual)
+
+    def _run_once_locked(self, manual: bool) -> Dict[str, Any]:
+        """主流程实体；由 run_once 持锁调用。"""
         started = datetime.now()
         result: Dict[str, Any] = {
             "time": started.strftime("%Y-%m-%d %H:%M:%S"), "manual": manual,
-            "scanned": 0, "renamed": 0, "skipped": 0, "manual": 0,
-            "errors": [], "detail": [],
+            "dry_run": self._dry_run, "scanned": 0, "imported": 0, "extrapolated": 0,
+            "skipped": 0, "quarantined": 0, "corrected": 0, "errors": [], "detail": [],
         }
-        if not self._src_dir or not self._dst_dir:
-            result["errors"].append("未配置监控目录或目标目录")
+        if not self._src_dir:
+            result["errors"].append("未配置做种目录")
             self._last_result = result
             return result
-        src_root, dst_root = Path(self._src_dir), Path(self._dst_dir)
+        src_root = Path(self._src_dir)
         if not src_root.is_dir():
-            result["errors"].append(f"监控目录不存在：{src_root}")
+            result["errors"].append(f"做种目录不存在：{src_root}")
+            self._last_result = result
+            return result
+        if not self._library_dir:
+            result["errors"].append("未配置媒体库目录")
             self._last_result = result
             return result
 
         data = self._load_mapping_data()
-        if not data:
+        mapping = self._build_mapping(data) if data else {}
+        if not mapping:
             result["errors"].append("映射数据获取失败")
             self._last_result = result
             return result
-        mapping = self._build_mapping(data)
-        if not mapping:
-            result["errors"].append("映射表为空")
-            self._last_result = result
-            return result
         extra = self._load_extra_map()
-        logger.info(f"柯南映射重命名：映射 {len(mapping)} 条，最大拆分版 "
-                    f"{max(mapping)}；开始扫描 {src_root}")
+        ledger = self._load_ledger()
 
-        # 1. 扫描（递归；跳过隐藏/临时目录）
-        candidates: List[Tuple[Path, int, str]] = []
-        for path in sorted(src_root.rglob("*")):
+        # 1. 收集候选：实时队列 + 递归扫描
+        candidates: List[Path] = []
+        seen: set = set()
+        for path in list(self._queue) + sorted(src_root.rglob("*")):
             try:
                 if not path.is_file() or path.suffix.lower() not in MEDIA_EXT:
                     continue
@@ -828,93 +1109,286 @@ class ConanRename(_PluginBase):
                     continue
             except OSError:
                 continue
-            result["scanned"] += 1
+            key = str(path)
+            if key in seen:
+                continue
+            seen.add(key)
+            candidates.append(path)
+        self._queue = []
+        result["scanned"] = len(candidates)
+
+        # 1.5 首次启用：把历史文件直接写进账本（stage=legacy），只登记不入库，
+        #     避免插件上线后把 1280 个已入库的老文件重跑一遍。
+        if self._bootstrap:
+            bootstrapped = 0
+            for path in candidates:
+                key = str(path)
+                if key in ledger:
+                    continue
+                fp = self._fingerprint(path)
+                if not fp:
+                    continue
+                split_no = self._detect_episode(path.stem)
+                season, tmdb, source = self._resolve_episode(split_no, mapping, extra) \
+                    if split_no is not None else (None, None, "none")
+                ledger[key] = {
+                    **fp, "split": split_no, "season": season, "tmdb": tmdb, "source": source,
+                    "stage": "legacy", "signature": self._mapping_signature(mapping),
+                    "updated_at": datetime.now().isoformat(timespec="seconds"),
+                }
+                bootstrapped += 1
+            self._save_ledger(ledger)
+            result["detail"].append(f"首次启用：已登记 {bootstrapped} 个历史文件（不入库）")
+            logger.info(f"柯南全流程：首次启用登记 {bootstrapped} 个历史文件")
+            self._bootstrap = False
+            self.__update_config()
+            self._last_result = result
+            return result
+
+        # 2. 解析集号（遇到未映射先强制刷新一次）
+        plans: List[Tuple[Path, int, int, int, str]] = []
+        unresolved: List[Tuple[Path, int]] = []
+        for path in candidates:
             split_no = self._detect_episode(path.stem)
             if split_no is None:
-                result["errors"].append(f"无法识别集号：{path.name}")
+                self._quarantine(path, "无法识别集号", result)
                 continue
-            candidates.append((path, split_no, path.stem))
-
-        # 2. 分组：同一 TMDB 集号对应多个拆分版时加 -partN
-        groups: Dict[int, List[int]] = {}
-        for _, split_no, _ in candidates:
-            tmdb = mapping.get(split_no)
-            if tmdb is not None:
-                groups.setdefault(tmdb, []).append(split_no)
-
-        plan: List[Tuple[Path, Path]] = []
-        manual_count = 0
-        for path, split_no, stem in candidates:
-            if split_no in extra:
-                tag = extra[split_no]
-            elif split_no in mapping:
-                tmdb = mapping[split_no]
-                members = sorted(groups.get(tmdb, []))
-                tag = f"S01E{tmdb:04d}"
-                if len(members) > 1:
-                    tag = f"{tag}-part{members.index(split_no) + 1}"
-            else:
-                manual_count += 1
-                result["detail"].append(f"待人工（映射里没有）：{path.name}")
-                plan.append((path, dst_root / "_待人工" / path.name))
+            season, tmdb, source = self._resolve_episode(split_no, mapping, extra)
+            if tmdb is None:
+                unresolved.append((path, split_no))
                 continue
-            new_stem = EP_TOKEN.sub(tag, stem, count=1)
-            if new_stem == stem:
-                new_stem = f"{stem}.{tag}"
-            # 注意：stem 不含扩展名，必须拼回原后缀
-            plan.append((path, dst_root / f"{new_stem}{path.suffix}"))
-        result["manual"] = manual_count
+            plans.append((path, split_no, season, tmdb, source))
 
-        # 3. 执行（绝不覆盖已有文件）
-        manifest: List[dict] = []
-        for src, dst in plan:
+        if unresolved:
+            refreshed = self._force_refresh_mapping()
+            if refreshed:
+                mapping = self._build_mapping(refreshed)
+                still: List[Tuple[Path, int]] = []
+                for path, split_no in unresolved:
+                    season, tmdb, source = self._resolve_episode(split_no, mapping, extra)
+                    if tmdb is None:
+                        still.append((path, split_no))
+                    else:
+                        plans.append((path, split_no, season, tmdb, source))
+                unresolved = still
+            for path, split_no in unresolved:
+                self._quarantine(path, f"映射缺失且超出外推窗口（拆分版 {split_no}）", result)
+
+        result["extrapolated"] = sum(1 for *_, s in plans if s == "extrapolated")
+        signature = self._mapping_signature(mapping)
+
+        # 3. 入库
+        for path, split_no, season, tmdb, source in plans:
             try:
-                if dst.exists() and dst.resolve() != src.resolve():
-                    result["skipped"] += 1
-                    result["detail"].append(f"目标已存在，跳过：{dst.name}")
-                    continue
-                if self._dry_run:
-                    result["renamed"] += 1
-                    result["detail"].append(f"[预演] {src.name} → {dst.name}")
-                    continue
-                dst.parent.mkdir(parents=True, exist_ok=True)
-                if self._mode == "link":
-                    os.link(src, dst)
-                else:
-                    shutil.move(str(src), str(dst))
-                result["renamed"] += 1
-                manifest.append({"src": str(src), "dst": str(dst)})
+                self._import_one(path, split_no, season, tmdb, source, signature, ledger, result)
             except Exception as e:
-                result["errors"].append(f"{src.name} 处理失败：{str(e)[:80]}")
+                result["errors"].append(f"{path.name} 处理失败：{str(e)[:120]}")
+                logger.error(f"柯南全流程：{path.name} 处理失败：{str(e)}")
 
-        # 4. 清单落盘 + 清理空目录
-        if manifest:
-            try:
-                log_file = self.get_data_path() / f"rename-{started:%Y%m%d}.jsonl"
-                with open(log_file, "a", encoding="utf-8") as f:
-                    for item in manifest:
-                        f.write(json.dumps(item, ensure_ascii=False) + "\n")
-            except Exception as e:
-                logger.error(f"写改名清单失败：{str(e)}")
-            try:
-                for path in sorted(src_root.rglob("*"), reverse=True):
-                    if path.is_dir() and not any(path.iterdir()):
-                        path.rmdir()
-            except Exception:
-                pass
+        # 4. 事后自纠：映射补全后核对旧的外推结论
+        try:
+            self._verify_extrapolations(mapping, extra, ledger, result)
+        except Exception as e:
+            result["errors"].append(f"账本核对失败：{str(e)[:120]}")
 
+        self._save_ledger(ledger)
         self._last_result = result
-        logger.info(f"柯南映射重命名完成：扫描 {result['scanned']}｜改名 {result['renamed']}｜"
-                    f"跳过 {result['skipped']}｜待人工 {result['manual']}｜"
-                    f"错误 {len(result['errors'])}")
+        self._cleanup_empty_dirs(src_root)
+        logger.info(
+            f"柯南全流程完成：扫描 {result['scanned']}｜入库 {result['imported']}｜"
+            f"外推 {result['extrapolated']}｜跳过 {result['skipped']}｜"
+            f"隔离 {result['quarantined']}｜纠正 {result['corrected']}｜错误 {len(result['errors'])}")
         for err in result["errors"][:5]:
             logger.warning(err)
-        if self._notify and (result["renamed"] or result["errors"] or result["manual"]):
+        if self._notify and (result["imported"] or result["errors"] or result["quarantined"]):
             self.post_message(
                 mtype=NotificationType.Manual,
-                title=f"柯南映射重命名：改名 {result['renamed']} 个"
+                title=f"柯南全流程：入库 {result['imported']} 个"
                       + ("（预演）" if self._dry_run else ""),
-                text=f"扫描 {result['scanned']}｜跳过 {result['skipped']}｜"
-                     f"待人工 {result['manual']}｜错误 {len(result['errors'])}",
+                text=f"扫描 {result['scanned']}｜外推 {result['extrapolated']}｜"
+                     f"隔离 {result['quarantined']}｜纠正 {result['corrected']}｜"
+                     f"错误 {len(result['errors'])}",
             )
         return result
+
+    def _import_one(self, path: Path, split_no: int, season: int, tmdb: int, source: str,
+                    signature: str, ledger: Dict[str, dict], result: Dict[str, Any]) -> None:
+        """单个文件：判重 → 构造 meta → 交给 TransferChain 入库。"""
+        fp = self._fingerprint(path)
+        if not fp:
+            result["skipped"] += 1
+            return
+        record = ledger.get(str(path))
+        if record and record.get("stage") in ("imported", "legacy") \
+                and record.get("size") == fp["size"] and record.get("mtime") == fp["mtime"]:
+            result["skipped"] += 1
+            return
+
+        if self._dry_run:
+            result["detail"].append(
+                f"[预演] {path.name} → S{season:02d}E{tmdb:04d}（{source}）")
+            result["imported"] += 1
+            return
+
+        from app.chain.storage import StorageChain
+        from app.chain.transfer import TransferChain
+        from app.schemas import TransferDirectoryConf
+        from app.schemas.types import MediaType
+        from app.sdk.media import MetaInfoPath
+
+        # 构造最终 meta：用拆分版文件名解析，再把集号换成 TMDB 号
+        file_item = StorageChain().get_file_item(storage="local", path=path)
+        if not file_item:
+            result["errors"].append(f"{path.name} 未找到文件项")
+            return
+
+        file_meta = MetaInfoPath(path)
+        if not file_meta:
+            result["errors"].append(f"{path.name} 无法解析元数据")
+            return
+        file_meta.begin_season = season
+        file_meta.begin_episode = tmdb
+        file_meta.end_episode = None
+
+        # 识别媒体：优先用配置的 TMDB ID，避免标题识别抖动
+        chain = TransferChain()
+        if self._media_id.isdigit():
+            mediainfo = chain.recognize_media(
+                media_source="themoviedb", media_id=self._media_id,
+                mtype=MediaType.TV)
+        else:
+            probe = MetaInfoPath(path)
+            if self._media_title:
+                probe.cn_name = self._media_title
+                probe.name = self._media_title
+            mediainfo = chain.recognize_media(meta=probe)
+        if not mediainfo:
+            result["errors"].append(f"{path.name} 未识别到媒体信息")
+            return
+
+        episodes_info = None
+        if mediainfo.tmdb_id:
+            try:
+                from app.chain.tmdb import TmdbChain
+                episodes_info = TmdbChain().tmdb_episodes(
+                    tmdbid=int(mediainfo.tmdb_id), season=season)
+            except Exception as e:
+                logger.warning(f"柯南全流程：获取 TMDB 集信息失败：{str(e)}")
+
+        target_dir = TransferDirectoryConf()
+        target_dir.library_path = self._library_dir
+        target_dir.library_storage = "local"
+        target_dir.transfer_type = self._transfer_type
+        target_dir.scraping = self._scrape
+        target_dir.renaming = True
+        target_dir.notify = False
+        target_dir.overwrite_mode = self._overwrite_mode
+        target_dir.library_category_folder = self._category_folder
+
+        transferinfo = chain.transfer(
+            fileitem=file_item, meta=file_meta, mediainfo=mediainfo,
+            target_directory=target_dir, episodes_info=episodes_info)
+
+        if not transferinfo:
+            result["errors"].append(f"{path.name} 整理模块无返回")
+            return
+        if not transferinfo.success:
+            if getattr(transferinfo, "overwrite_skipped", False):
+                result["skipped"] += 1
+                ledger[str(path)] = {
+                    **fp, "split": split_no, "season": season, "tmdb": tmdb, "source": source,
+                    "stage": "skipped", "updated_at": datetime.now().isoformat(timespec="seconds"),
+                }
+                return
+            result["errors"].append(f"{path.name} 入库失败：{transferinfo.message}")
+            return
+
+        lib_path = str(transferinfo.target_item.path) if transferinfo.target_item else ""
+        ledger[str(path)] = {
+            **fp, "split": split_no, "season": season, "tmdb": tmdb, "source": source,
+            "stage": "imported", "lib_path": lib_path,
+            "signature": signature,
+            "updated_at": datetime.now().isoformat(timespec="seconds"),
+        }
+        result["imported"] += 1
+        result["detail"].append(f"{path.name} → S{season:02d}E{tmdb:04d}（{source}）")
+        logger.info(f"柯南全流程：{path.name} → {lib_path or f'S{season:02d}E{tmdb:04d}'}（{source}）")
+
+    def _quarantine(self, path: Path, reason: str, result: Dict[str, Any]) -> None:
+        """把判定不了的文件移到隔离目录（只在配置了隔离目录时才移动）。"""
+        result["quarantined"] += 1
+        result["detail"].append(f"隔离（{reason}）：{path.name}")
+        logger.warning(f"柯南全流程：隔离 {path.name}，原因：{reason}")
+        if self._dry_run:
+            return
+        target_root = Path(self._quarantine_dir) if self._quarantine_dir else \
+            Path(self._library_dir) / "_待人工"
+        try:
+            target_root.mkdir(parents=True, exist_ok=True)
+            target = target_root / path.name
+            if target.exists():
+                return
+            os.link(path, target)
+        except Exception as e:
+            result["errors"].append(f"{path.name} 隔离失败：{str(e)[:80]}")
+
+    def _verify_extrapolations(self, mapping: Dict[int, int], extra: Dict[int, str],
+                               ledger: Dict[str, dict], result: Dict[str, Any]) -> None:
+        """映射补全后，核对之前的外推结论；不一致就把库内文件改名到正确集号。"""
+        for src, item in list(ledger.items()):
+            if item.get("stage") != "imported" or item.get("source") != "extrapolated":
+                continue
+            split_no = item.get("split")
+            if not isinstance(split_no, int):
+                continue
+            season, tmdb, source = self._resolve_episode(split_no, mapping, extra)
+            if source == "extrapolated" or tmdb is None or tmdb == item.get("tmdb"):
+                continue
+            season = season or 1
+            # 映射已补全且与外推不一致 → 纠正库内文件
+            old_tmdb = item.get("tmdb")
+            lib_path = item.get("lib_path")
+            if not lib_path:
+                continue
+            old_file = Path(lib_path)
+            if not old_file.exists():
+                continue
+            # 重命名模板除了 {{season_episode}} 还可能写 {{episode}}（如
+            # 「… - S01E1222 - 第 1222 集.mp4」），两处集号都要换掉。
+            new_name = EP_TOKEN.sub(f"S{season:02d}E{tmdb:04d}", old_file.name, count=1)
+            if old_tmdb:
+                new_name = re.sub(rf"(?<!\d){old_tmdb:04d}(?!\d)",
+                                  f"{tmdb:04d}", new_name)
+            new_file = old_file.with_name(new_name)
+            if new_file == old_file or new_file.exists():
+                continue
+            if self._dry_run:
+                result["detail"].append(f"[预演] 纠正 {old_file.name} → {new_name}")
+                result["corrected"] += 1
+                continue
+            try:
+                os.rename(old_file, new_file)
+                # 同名 nfo/jpg/png 一起改
+                for suffix in (".nfo", ".jpg", ".png", "-thumb.jpg"):
+                    old_side = old_file.with_name(old_file.stem + suffix)
+                    if old_side.exists():
+                        os.rename(old_side, new_file.with_name(new_file.stem + suffix))
+                item.update({"season": season, "tmdb": tmdb, "source": source,
+                             "lib_path": str(new_file),
+                             "updated_at": datetime.now().isoformat(timespec="seconds")})
+                result["corrected"] += 1
+                result["detail"].append(
+                    f"纠正 E{old_tmdb:04d} → S{season:02d}E{tmdb:04d}：{new_file.name}")
+                logger.info(f"柯南全流程：外推纠正 E{old_tmdb:04d} → S{season:02d}E{tmdb:04d}（{new_file.name}）")
+            except Exception as e:
+                result["errors"].append(f"纠正 {old_file.name} 失败：{str(e)[:80]}")
+
+    @staticmethod
+    def _cleanup_empty_dirs(root: Path) -> None:
+        """清理做种目录下的空子目录（不动非空目录）。"""
+        try:
+            for path in sorted(root.rglob("*"), reverse=True):
+                if path.is_dir() and not any(path.iterdir()):
+                    path.rmdir()
+        except Exception:
+            pass

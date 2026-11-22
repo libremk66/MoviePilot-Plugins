@@ -597,7 +597,9 @@ class ConanRename(_PluginBase):
                 {"path": "/conan_words_preview", "endpoint": self.api_words_preview, "methods": ["GET"],
                  "summary": "预览将要写入的识别词（不写库）"},
                 {"path": "/conan_ledger", "endpoint": self.api_ledger, "methods": ["GET"],
-                 "summary": "查看入库账本"}]
+                 "summary": "查看入库账本"},
+                {"path": "/conan_drop_note", "endpoint": self.api_drop_note, "methods": ["GET"],
+                 "summary": "从订阅 note 中移除指定集号（参数 sids=405&episodes=1279,1281）"}]
 
     @eventmanager.register(EventType.PluginAction)
     def remote_run(self, event: Event):
@@ -644,6 +646,45 @@ class ConanRename(_PluginBase):
         if apikey != settings.API_TOKEN:
             return schemas.Response(success=False, message="API密钥错误")
         return schemas.Response(success=True, data=self._load_ledger())
+
+    def api_drop_note(self, apikey: str, sids: str = "", episodes: str = ""):
+        """
+        从订阅的 note（已下载集号）中移除指定集号。
+
+        用于修复历史误入库：某些集号从未真正入库，却因早期流水线的错误被记成"已下载"，
+        不清掉会让 MP 永远不再搜索这些集。只删不增，且不会触碰 episode_priority。
+        """
+        if apikey != settings.API_TOKEN:
+            return schemas.Response(success=False, message="API密钥错误")
+        try:
+            drop = {int(x) for x in str(episodes).replace(" ", "").split(",") if x}
+            target_sids = [int(x) for x in str(sids).replace(" ", "").split(",") if x]
+        except ValueError:
+            return schemas.Response(success=False, message="参数格式错误")
+        if not drop or not target_sids:
+            return schemas.Response(success=False, message="需要 sids 与 episodes 参数")
+
+        from app.db.oper.subscribe import SubscribeOper
+        oper = SubscribeOper()
+        result = {"sids": {}, "dropped": sorted(drop)}
+        for sid in target_sids:
+            sub = oper.get(sid)
+            if not sub:
+                result["sids"][sid] = "订阅不存在"
+                continue
+            old = [int(x) for x in (sub.note or []) if str(x).isdigit()]
+            new = [x for x in old if x not in drop]
+            if new == old:
+                result["sids"][sid] = f"无需修改（note={old}）"
+                continue
+            if self._dry_run:
+                result["sids"][sid] = f"[预演] {old} -> {new}"
+                continue
+            oper.update(sid, {"note": new})
+            result["sids"][sid] = f"{old} -> {new}"
+            logger.info(f"柯南全流程：订阅 {sid} 的 note 已移除 {sorted(set(old) - set(new))}，"
+                        f"现为 {new}")
+        return schemas.Response(success=True, data=result)
 
     # ─── 映射数据 ───
 

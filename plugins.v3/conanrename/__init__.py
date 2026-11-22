@@ -89,7 +89,7 @@ class ConanRename(_PluginBase):
     # 插件图标
     plugin_icon = "Linkace_C.png"
     # 插件版本
-    plugin_version = "2.0.0"
+    plugin_version = "2.0.1"
     # 插件作者
     plugin_author = "libremk66"
     # 作者主页
@@ -138,19 +138,28 @@ class ConanRename(_PluginBase):
     _sync_front: str = r"Conan[\s.]S01E"
     _sync_back: str = r"[\s.]1996"
     _sync_keep_others: bool = True
-    # 运行时
-    _observers: List[Any] = []
-    _queue: List[Path] = []
-    _debounce_timer: Optional[threading.Timer] = None
-    _debounce_lock = threading.Lock()
-    _run_lock = threading.Lock()
-    _last_result: Dict[str, Any] = {}
-    _last_sync: Dict[str, Any] = {}
+    # 运行时状态。**全部必须是实例级**：这些字段若在类上赋可变默认值，
+    # 所有实例（含重载前后的新旧实例）会共享同一个列表/锁，导致
+    # 「旧 observer 停不掉 + 新 observer 重复启动 + 锁被跨实例持有」。
+    # 因此这里只做类型标注，实际对象在 init_plugin 里创建。
+    _observers: List[Any]
+    _queue: List[Path]
+    _debounce_timer: Optional[threading.Timer]
+    _last_result: Dict[str, Any]
+    _last_sync: Dict[str, Any]
 
     # ─── 生命周期 ───
 
     def init_plugin(self, config: dict = None):
         """读取配置；勾选"立即运行一次"时安排一次执行。"""
+        # 实例级状态：每次加载都是全新的，绝不与上一实例共享
+        self._debounce_lock = threading.Lock()
+        self._run_lock = threading.RLock()
+        self._debounce_timer = None
+        self._queue = []
+        self._observers = []
+        self._last_result = {}
+        self._last_sync = {}
         self.stop_service()
         if config:
             self._enabled = bool(config.get("enabled"))
@@ -235,16 +244,22 @@ class ConanRename(_PluginBase):
 
     def stop_service(self):
         """释放定时器与监控。"""
-        with self._debounce_lock:
-            if self._debounce_timer:
-                self._debounce_timer.cancel()
+        lock = getattr(self, "_debounce_lock", None)
+        if lock is not None:
+            with lock:
+                timer = getattr(self, "_debounce_timer", None)
+                if timer:
+                    timer.cancel()
                 self._debounce_timer = None
         try:
-            for observer in self._observers:
+            for observer in list(getattr(self, "_observers", []) or []):
                 try:
                     observer.stop()
-                except Exception:
-                    pass
+                    # 必须 join：watchdog 的 inotify 线程在 stop() 后仍需时间真正退出，
+                    # 只 stop 不 join 会让重载后的新 observer 与旧线程并存，同一批文件被触发多次。
+                    observer.join(timeout=5)
+                except Exception as e:
+                    logger.warning(f"柯南全流程：停止监控线程出错：{str(e)}")
             self._observers = []
         except Exception as e:
             logger.error(f"柯南全流程：停止监控出错：{str(e)}")
@@ -1033,7 +1048,7 @@ class ConanRename(_PluginBase):
                 return
             if path not in self._queue:
                 self._queue.append(path)
-            logger.debug(f"柯南全流程：收到待处理文件 {path.name}")
+            logger.info(f"柯南全流程：监控收到文件 {path.name}（队列 {len(self._queue)}）")
             self._schedule_debounced_run()
         except Exception as e:
             logger.error(f"柯南全流程：入队失败：{str(e)}")
@@ -1049,14 +1064,11 @@ class ConanRename(_PluginBase):
             self._debounce_timer = timer
 
     def _debounced_run(self) -> None:
-        """防抖触发点：串行执行一次主流程。"""
-        if self._run_lock.acquire(blocking=False):
-            try:
-                self.run_once(manual=False)
-            except Exception as e:
-                logger.error(f"柯南全流程：实时处理失败：{str(e)}")
-            finally:
-                self._run_lock.release()
+        """防抖触发点；串行化由 run_once 内部的锁负责，这里不能重复取锁。"""
+        try:
+            self.run_once(manual=False)
+        except Exception as e:
+            logger.error(f"柯南全流程：实时处理失败：{str(e)}")
 
     # ─── 主流程 ───
 

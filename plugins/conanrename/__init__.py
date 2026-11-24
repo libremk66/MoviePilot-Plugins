@@ -1,6 +1,6 @@
 # coding=UTF-8
 """
-柯南全流程入库（ConanRename 2.0.0）
+柯南全流程入库（ConanRename 2.0.2）
 
 一条插件搞定柯南的「监听 → 集号换算 → 硬链入库 → 订阅事实同步」，替代原先
 「LinkMonitorPlus 硬链 + 本插件改名 + CloudLinkMonitor 入库」三段式。
@@ -59,6 +59,11 @@ SYNC_MARK_BEGIN = "# >>> ConanRename 自动同步（插件维护，请勿手改�
 SYNC_MARK_END = "# <<< ConanRename 自动同步区块结束"
 # 账本文件名
 LEDGER_FILE = "pipeline.json"
+# 映射后备数据（仓库快照，sbsub 不可用时兜底）。按顺序尝试，先到先得。
+FALLBACK_MAPPING_URLS = (
+    "https://cdn.jsdelivr.net/gh/libremk66/MoviePilot-Plugins@main/conan-mapping/mapping.json",
+    "https://raw.githubusercontent.com/libremk66/MoviePilot-Plugins/main/conan-mapping/mapping.json",
+)
 
 
 class _WatchHandler(FileSystemEventHandler):
@@ -89,7 +94,7 @@ class ConanRename(_PluginBase):
     # 插件图标
     plugin_icon = "Linkace_C.png"
     # 插件版本
-    plugin_version = "2.0.1"
+    plugin_version = "2.0.2"
     # 插件作者
     plugin_author = "libremk66"
     # 作者主页
@@ -122,6 +127,11 @@ class ConanRename(_PluginBase):
     _bootstrap: bool = False       # 首次启用：把做种目录里已有的历史文件一次性入账（不重复入库）
     # 映射
     _mapping_url: str = "https://cloud.sbsub.com/data/data.json"
+    _fallback_urls: List[str]
+    _fallback_cache_minutes: int = 360
+    _mapping_retry_minutes: int = 30
+    _mapping_retry_at: datetime = datetime.min
+    _mapping_source: str = ""
     _extra_map: str = ""
     _dry_run: bool = False
     _cache_minutes: int = 20
@@ -160,6 +170,8 @@ class ConanRename(_PluginBase):
         self._observers = []
         self._last_result = {}
         self._last_sync = {}
+        self._mapping_retry_at = datetime.min
+        self._mapping_source = ""
         self.stop_service()
         if config:
             self._enabled = bool(config.get("enabled"))
@@ -183,6 +195,16 @@ class ConanRename(_PluginBase):
             self._bootstrap = bool(config.get("bootstrap"))
             self._mapping_url = str(config.get("mapping_url") or "").strip() or \
                 "https://cloud.sbsub.com/data/data.json"
+            urls = [u.strip() for u in str(config.get("fallback_urls") or "").splitlines() if u.strip()]
+            self._fallback_urls = urls or list(FALLBACK_MAPPING_URLS)
+            try:
+                self._fallback_cache_minutes = max(1, int(config.get("fallback_cache_minutes") or 360))
+            except (TypeError, ValueError):
+                self._fallback_cache_minutes = 360
+            try:
+                self._mapping_retry_minutes = max(1, int(config.get("mapping_retry_minutes") or 30))
+            except (TypeError, ValueError):
+                self._mapping_retry_minutes = 30
             self._extra_map = config.get("extra_map") or ""
             self._dry_run = bool(config.get("dry_run"))
             try:
@@ -307,6 +329,9 @@ class ConanRename(_PluginBase):
             "grace": self._grace, "quarantine_dir": self._quarantine_dir,
             "bootstrap": self._bootstrap,
             "mapping_url": self._mapping_url, "extra_map": self._extra_map,
+            "fallback_urls": "\n".join(self._fallback_urls),
+            "fallback_cache_minutes": self._fallback_cache_minutes,
+            "mapping_retry_minutes": self._mapping_retry_minutes,
             "dry_run": self._dry_run, "cache_minutes": self._cache_minutes,
             "legacy_dst_dir": self._legacy_dst_dir,
             "sync_enabled": self._sync_enabled, "sync_cron": self._sync_cron,
@@ -425,6 +450,21 @@ class ConanRename(_PluginBase):
                 {"component": "VRow", "content": [
                     {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
                         {"component": "VTextarea", "props": {
+                            "model": "fallback_urls", "label": "后备映射地址（每行一个，按序尝试；留空用内置仓库快照）",
+                            "rows": 2,
+                            "placeholder": "https://cdn.jsdelivr.net/gh/用户/仓库@main/conan-mapping/mapping.json"}}]},
+                    {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [
+                        {"component": "VTextField", "props": {
+                            "model": "fallback_cache_minutes", "label": "后备映射缓存分钟数",
+                            "type": "number"}}]},
+                    {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [
+                        {"component": "VTextField", "props": {
+                            "model": "mapping_retry_minutes", "label": "全源失败后重试间隔（分钟）",
+                            "type": "number"}}]},
+                ]},
+                {"component": "VRow", "content": [
+                    {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
+                        {"component": "VTextarea", "props": {
                             "model": "extra_map", "label": "补充映射（每行：拆分版号=TMDB季集）",
                             "rows": 3, "placeholder": "1134=S0E32\n1262=S0E34"}}]},
                     {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
@@ -493,6 +533,7 @@ class ConanRename(_PluginBase):
             "grace": self._grace, "quarantine_dir": self._quarantine_dir,
             "bootstrap": self._bootstrap,
             "cron": self._cron, "mapping_url": self._mapping_url,
+            "fallback_urls": "\n".join(self._fallback_urls),
             "cache_minutes": self._cache_minutes, "extra_map": self._extra_map,
             "legacy_dst_dir": self._legacy_dst_dir,
             "sync_enabled": self._sync_enabled, "sync_cron": self._sync_cron,
@@ -545,7 +586,8 @@ class ConanRename(_PluginBase):
         tail = ranges[-1]
         content.append({"component": "VAlert", "props": {
             "type": "info", "variant": "tonal", "class": "mb-2",
-            "text": f"当前映射 {len(mapping)} 条（拆分版 {min(mapping)}–{max(mapping)}）｜"
+            "text": f"当前映射 {len(mapping)} 条（拆分版 {min(mapping)}–{max(mapping)}）"
+                    f"｜来源 {self._mapping_source or '未记录'}｜"
                     f"偏移区间 {len(ranges)} 段｜最新偏移 {tail['offset']:+d}"
                     f"（拆分 {tail['start']}–{tail['end']} → TMDB {tail['tmdb_start']}–{tail['tmdb_end']}）｜"
                     f"外推上界 拆分 {max(mapping) + self._grace}"}})
@@ -691,55 +733,159 @@ class ConanRename(_PluginBase):
     def _cache_file(self) -> Path:
         return self.get_data_path() / "sbsub-data.json"
 
-    def _load_mapping_data(self) -> Optional[dict]:
-        """取 sbsub 数据：优先用未过期缓存，失败则退回旧缓存。"""
-        cache = self._cache_file()
-        if cache.exists() and self._cache_minutes > 0:
-            try:
-                age = datetime.now() - datetime.fromtimestamp(cache.stat().st_mtime)
-                if age < timedelta(minutes=self._cache_minutes):
-                    return json.loads(cache.read_text(encoding="utf-8"))
-            except Exception as e:
-                logger.warning(f"读取映射缓存失败：{str(e)}")
+    def _fallback_cache_file(self) -> Path:
+        return self.get_data_path() / "mapping-fallback.json"
+
+    @staticmethod
+    def _read_json(path: Path) -> Optional[dict]:
+        """读 JSON 文件，任何异常（不存在/损坏）都当没有。"""
+        try:
+            if path.exists():
+                data = json.loads(path.read_text(encoding="utf-8"))
+                return data if isinstance(data, dict) else None
+        except Exception as e:
+            logger.warning(f"读取 {path.name} 失败：{str(e)}")
+        return None
+
+    @staticmethod
+    def _write_json(path: Path, data: dict) -> None:
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        except Exception as e:
+            logger.warning(f"写入 {path.name} 失败：{str(e)}")
+
+    @staticmethod
+    def _file_age_minutes(path: Path) -> Optional[float]:
+        try:
+            return (datetime.now() - datetime.fromtimestamp(path.stat().st_mtime)).total_seconds() / 60
+        except Exception:
+            return None
+
+    def _mapping_score(self, data: Optional[dict]) -> int:
+        """数据完整度评分：映射覆盖到的最大拆分版号。取新不取旧时用它比较。"""
+        if not data:
+            return 0
+        try:
+            mapping = self._build_mapping(data)
+        except Exception:
+            return 0
+        return max(mapping) if mapping else 0
+
+    def _better(self, *datas: Optional[dict]) -> Optional[dict]:
+        """从多份候选数据里挑覆盖最全的一份（映射只增不减，集号越大越新）。"""
+        best, best_score = None, 0
+        for data in datas:
+            score = self._mapping_score(data)
+            if score > best_score:
+                best, best_score = data, score
+        return best
+
+    def _mapping_fallback_urls(self) -> List[str]:
+        return [u for u in self._fallback_urls if u]
+
+    def _fetch_primary(self) -> Optional[dict]:
+        """主源（sbsub 实时）。这是权威数据，成功即用，不与其他源比新旧。"""
         try:
             resp = requests.get(self._mapping_url, timeout=30,
                                 headers={"User-Agent": "Mozilla/5.0 MoviePilot-Plugin/ConanRename"})
             resp.raise_for_status()
             data = resp.json()
-            cache.parent.mkdir(parents=True, exist_ok=True)
-            cache.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+            if not self._mapping_score(data):
+                logger.error("主源映射数据结构不认识，按失败处理")
+                return None
+            self._write_json(self._cache_file(), data)
             logger.info("映射数据已更新")
             return data
         except Exception as e:
             logger.error(f"获取映射数据失败：{str(e)}")
-            try:
-                if cache.exists():
-                    logger.warning("改用过期的映射缓存继续处理")
-                    return json.loads(cache.read_text(encoding="utf-8"))
-            except Exception:
-                pass
             return None
 
-    def _force_refresh_mapping(self) -> Optional[dict]:
-        """遇到未映射集号时强制拉一次（限流：同一轮只拉一次，失败退回缓存）。"""
+    def _load_fallback_data(self, force: bool = False) -> Optional[dict]:
+        """仓库快照（GitHub，定时同步自 sbsub）：多镜像按序尝试，带本地副本。"""
+        cache = self._fallback_cache_file()
+        cached = self._read_json(cache)
+        if not force and cached is not None:
+            age = self._file_age_minutes(cache)
+            if age is not None and age < self._fallback_cache_minutes:
+                return cached
+        for url in self._mapping_fallback_urls():
+            try:
+                resp = requests.get(url, timeout=15,
+                                    headers={"User-Agent": "Mozilla/5.0 MoviePilot-Plugin/ConanRename"})
+                resp.raise_for_status()
+                data = resp.json()
+                if not self._mapping_from_slim(data):
+                    logger.warning(f"仓库快照结构不认识，跳过：{url}")
+                    continue
+                # 快照可能比本地副本旧（CDN 缓存），取新的那份
+                best = self._better(cached, data)
+                self._write_json(cache, best)
+                logger.warning(f"主源不可用，改用仓库快照映射：{url}")
+                return best
+            except Exception as e:
+                logger.warning(f"仓库快照获取失败（{url}）：{str(e)[:80]}")
+        return cached
+
+    def _load_mapping_data(self) -> Optional[dict]:
+        """
+        分层取映射：未过期缓存 → 主源(sbsub) → 仓库快照 → 旧缓存/旧快照副本。
+
+        全部失败时按 _mapping_retry_minutes 退避，避免 60s 轮询反复卡超时。
+        """
         cache = self._cache_file()
-        try:
-            resp = requests.get(self._mapping_url, timeout=30,
-                                headers={"User-Agent": "Mozilla/5.0 MoviePilot-Plugin/ConanRename"})
-            resp.raise_for_status()
-            data = resp.json()
-            cache.parent.mkdir(parents=True, exist_ok=True)
-            cache.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        cached = self._read_json(cache)
+        if cached is not None and self._cache_minutes > 0:
+            age = self._file_age_minutes(cache)
+            if age is not None and age < self._cache_minutes:
+                self._mapping_source = "缓存"
+                return cached
+
+        if datetime.now() < self._mapping_retry_at:
+            # 退避窗口内不再打网络，直接用现有副本
+            best = self._better(cached, self._read_json(self._fallback_cache_file()))
+            self._mapping_source = "本地副本（退避中）" if best else "不可用"
+            return best
+
+        data = self._fetch_primary()
+        if data is not None:
+            self._mapping_source = "sbsub 实时"
+            self._mapping_retry_at = datetime.min
+            return data
+
+        fallback = self._load_fallback_data()
+        best = self._better(cached, fallback)
+        # 主源失败即进入退避：即使手里有过期副本，也不能让每轮防抖都去等
+        # 主源 30s + 快照 15s×N 的超时，否则线程会堆积。
+        self._mapping_retry_at = datetime.now() + timedelta(minutes=self._mapping_retry_minutes)
+        if best is not None:
+            self._mapping_source = "仓库快照" if best is fallback else "过期缓存"
+            logger.warning(f"主源失败，映射改用{self._mapping_source}（覆盖至拆分版 "
+                           f"{self._mapping_score(best)}），{self._mapping_retry_minutes} 分钟后再试主源")
+            return best
+
+        self._mapping_source = "不可用"
+        logger.error(f"所有映射数据源均不可用，{self._mapping_retry_minutes} 分钟后重试")
+        return None
+
+    def _force_refresh_mapping(self) -> Optional[dict]:
+        """遇到未映射集号时强制拉一次（限流：同一轮只拉一次，失败退回缓存/快照）。"""
+        self._mapping_retry_at = datetime.min
+        data = self._fetch_primary()
+        if data is not None:
+            self._mapping_source = "sbsub 实时"
             logger.info("柯南全流程：因存在未映射集号，已强制刷新映射数据")
             return data
-        except Exception as e:
-            logger.warning(f"柯南全流程：强制刷新映射失败（继续用缓存）：{str(e)}")
-            try:
-                if cache.exists():
-                    return json.loads(cache.read_text(encoding="utf-8"))
-            except Exception:
-                pass
-            return None
+        fallback = self._load_fallback_data(force=True)
+        best = self._better(fallback, self._read_json(self._cache_file()),
+                            self._read_json(self._fallback_cache_file()))
+        self._mapping_retry_at = datetime.now() + timedelta(minutes=self._mapping_retry_minutes)
+        if best is not None:
+            self._mapping_source = "仓库快照" if best is fallback else "缓存"
+            logger.warning(f"柯南全流程：强制刷新主源失败，改用{self._mapping_source}")
+            return best
+        logger.warning("柯南全流程：强制刷新失败且无可用副本")
+        return None
 
     @staticmethod
     def _parse_split_nums(value: Any) -> List[int]:
@@ -758,8 +904,31 @@ class ConanRename(_PluginBase):
         except (TypeError, ValueError):
             return []
 
+    @staticmethod
+    def _is_slim(data: Optional[dict]) -> bool:
+        """仓库快照格式：{"source","version","mapping":{"拆分版号": TMDB 号}}。"""
+        return bool(data) and isinstance(data.get("mapping"), dict)
+
+    def _mapping_from_slim(self, data: Optional[dict]) -> Dict[int, int]:
+        """解析仓库快照的 mapping 字段（键值都必须是正整数）。"""
+        mapping: Dict[int, int] = {}
+        if not self._is_slim(data):
+            return mapping
+        for key, value in data["mapping"].items():
+            try:
+                split, tmdb = int(key), int(value)
+            except (TypeError, ValueError):
+                continue
+            if split > 0 and tmdb > 0:
+                mapping.setdefault(split, tmdb)
+        return mapping
+
     def _build_mapping(self, data: dict) -> Dict[int, int]:
         """拆分版集号 → TMDB 集号（sbsub 列表的键即为 TMDB 集号）。"""
+        if not data:
+            return {}
+        if self._is_slim(data):
+            return self._mapping_from_slim(data)
         mapping: Dict[int, int] = {}
         try:
             rows = data.get("res") or []

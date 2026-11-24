@@ -21,6 +21,7 @@ WANT_FUNC = {
     "_parse_split_nums", "_build_mapping", "_compute_ranges", "_digits_class",
     "_fixed_width_regex", "_range_regex", "_build_rules", "_load_extra_map",
     "_detect_episode", "_resolve_episode", "_mapping_signature", "_compose_words",
+    "_is_slim", "_mapping_from_slim",
 }
 
 import typing as _typing
@@ -73,7 +74,7 @@ ns["cfg"] = type("Cfg", (), {
 exec(compile("\n\n".join(patched), "<funcs>", "exec"), ns)
 # 把独立函数挂回 cfg，供 self.xxx 调用
 for _n in ("_parse_split_nums", "_compute_ranges", "_digits_class",
-           "_fixed_width_regex", "_range_regex"):
+           "_fixed_width_regex", "_range_regex", "_is_slim", "_mapping_from_slim"):
     setattr(ns["cfg"], _n, ns[_n])
 ns["cls"] = ns["cfg"]
 
@@ -161,6 +162,25 @@ words = g["_compose_words"]("# 用户自己的规则\nConan[\\s.]S01E <> [\\s.]1
 check("保留用户规则", "# 用户自己的规则" in words, True)
 check("清掉旧的手工同步规则", ">> EP-59" not in words, True)
 check("写入维护区块", g["SYNC_MARK_BEGIN"] in words and g["SYNC_MARK_END"] in words, True)
+
+# ── 7. 仓库快照（精简格式）解析 ──
+slim = {"source": "sbsub", "version": "b666c0e2",
+        "mapping": {"1": 1, "1281": 1221, "0": 5, "abc": 7, "5": 0}}
+slim_map = g["_build_mapping"](slim)
+check("精简格式被识别", g["_is_slim"](slim), True)
+check("原生格式不被误判", g["_is_slim"](fake_sbsub([(1, 1)])), False)
+# 只保留正整数对（0 / 非数字 / 非正 TMDB 号全部丢弃）
+check("精简格式解析结果", slim_map, {1: 1, 1281: 1221})
+check("空/异常输入不炸", g["_build_mapping"]({"mapping": {}}), {})
+check("None 不炸", g["_build_mapping"](None), {})
+# 两种格式解析同样内容必须等价，否则换源会算出不同集号
+pairs = [(1, 1), (1063, 1005), (1262, 1210), (1281, 1221)]
+slim_same = {"mapping": {str(s): t for s, t in pairs}}
+check("两种格式等价", g["_build_mapping"](fake_sbsub(pairs)), g["_build_mapping"](slim_same))
+
+# 半集特辑在精简格式里必须缺席（由 extra_map 唯一提供）
+slim_no_half = {"mapping": {"1134": 1076, "1262": 1202}}
+check("快照不含半集特辑", 1076 not in g["_build_mapping"](slim_no_half), True)
 
 print()
 if failures:
